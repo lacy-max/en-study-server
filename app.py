@@ -296,8 +296,17 @@ def _init_db():
             chapter_id TEXT NOT NULL,
             max_score REAL DEFAULT 0,
             done_days TEXT DEFAULT '[]',
+            modes TEXT DEFAULT '{}',
             last_study_at INTEGER DEFAULT 0,
             PRIMARY KEY (uid, chapter_id)
+        );
+        CREATE TABLE IF NOT EXISTS practice_state(
+            uid TEXT NOT NULL,
+            chapter_id TEXT NOT NULL,
+            mode TEXT NOT NULL,
+            data TEXT DEFAULT '{}',
+            updated_at INTEGER DEFAULT 0,
+            PRIMARY KEY (uid, chapter_id, mode)
         );
         CREATE TABLE IF NOT EXISTS wrongbook(
             uid TEXT NOT NULL,
@@ -338,8 +347,19 @@ def _uid_from_token(token: Optional[str]) -> str:
     return uid
 
 
+def _ensure_progress_modes_col(conn):
+    try:
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(progress)").fetchall()]
+        if "modes" not in cols:
+            conn.execute("ALTER TABLE progress ADD COLUMN modes TEXT DEFAULT '{}'")
+            conn.commit()
+    except Exception:
+        pass
+
+
 def _progress_map(uid: str) -> dict:
     conn = _db()
+    _ensure_progress_modes_col(conn)
     rows = conn.execute("SELECT * FROM progress WHERE uid=?", (uid,)).fetchall()
     conn.close()
     out = {}
@@ -348,9 +368,14 @@ def _progress_map(uid: str) -> dict:
             days = json.loads(r["done_days"] or "[]")
         except Exception:
             days = []
+        try:
+            modes = json.loads(r["modes"] or "{}")
+        except Exception:
+            modes = {}
         out[r["chapter_id"]] = {
             "maxScore": r["max_score"] or 0,
             "doneDays": days,
+            "modes": modes if isinstance(modes, dict) else {},
             "lastStudyAt": r["last_study_at"] or 0,
         }
     return out
@@ -414,6 +439,43 @@ def api_progress_get(x_token: Optional[str] = Header(None)):
     return {"progress": _progress_map(uid), "wrong": wrong, "settings": settings}
 
 
+@app.get("/api/state")
+async def api_state_get(chapter_id: str = Query(None, alias="chapterId"), x_token: Optional[str] = Header(None)):
+    uid = _uid_from_token(x_token)
+    conn = _db()
+    rows = conn.execute(
+        "SELECT mode,data,updated_at FROM practice_state WHERE uid=? AND chapter_id=?",
+        (uid, chapter_id or ""),
+    ).fetchall()
+    conn.close()
+    states = {}
+    for r in rows:
+        try:
+            states[r["mode"]] = json.loads(r["data"] or "{}")
+        except Exception:
+            states[r["mode"]] = {}
+    return {"ok": True, "states": states}
+
+
+@app.post("/api/state")
+async def api_state_save(request: Request, x_token: Optional[str] = Header(None)):
+    uid = _uid_from_token(x_token)
+    body = await request.json()
+    chapter_id = body.get("chapterId") or ""
+    mode = body.get("mode") or ""
+    if not mode:
+        raise HTTPException(status_code=400, detail="缺少 mode")
+    data = body.get("data") or {}
+    conn = _db()
+    conn.execute(
+        "INSERT OR REPLACE INTO practice_state(uid,chapter_id,mode,data,updated_at) VALUES(?,?,?,?,?)",
+        (uid, chapter_id, mode, json.dumps(data, ensure_ascii=False), int(_now_ts() * 1000)),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
 @app.post("/api/progress")
 async def api_progress_save(request: Request, x_token: Optional[str] = Header(None)):
     uid = _uid_from_token(x_token)
@@ -423,6 +485,7 @@ async def api_progress_save(request: Request, x_token: Optional[str] = Header(No
         raise HTTPException(status_code=400, detail="缺少 chapterId")
     patch = body.get("patch") or {}
     conn = _db()
+    _ensure_progress_modes_col(conn)
     row = conn.execute(
         "SELECT * FROM progress WHERE uid=? AND chapter_id=?", (uid, chapter_id)
     ).fetchone()
@@ -435,10 +498,26 @@ async def api_progress_save(request: Request, x_token: Optional[str] = Header(No
         for d in patch["doneDays"]:
             if d not in done_days:
                 done_days.append(d)
+    try:
+        old_modes = json.loads(row["modes"] or "{}") if row else {}
+    except Exception:
+        old_modes = {}
+    if not isinstance(old_modes, dict):
+        old_modes = {}
+    if isinstance(patch.get("modes"), dict):
+        old_modes.update(patch["modes"])
+
     last_at = int(_now_ts() * 1000)
     conn.execute(
-        "INSERT OR REPLACE INTO progress(uid,chapter_id,max_score,done_days,last_study_at) VALUES(?,?,?,?,?)",
-        (uid, chapter_id, max_score, json.dumps(done_days, ensure_ascii=False), last_at),
+        "INSERT OR REPLACE INTO progress(uid,chapter_id,max_score,done_days,modes,last_study_at) VALUES(?,?,?,?,?,?)",
+        (
+            uid,
+            chapter_id,
+            max_score,
+            json.dumps(done_days, ensure_ascii=False),
+            json.dumps(old_modes, ensure_ascii=False),
+            last_at,
+        ),
     )
     conn.commit()
     conn.close()
