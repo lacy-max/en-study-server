@@ -1,36 +1,42 @@
 import React, { useEffect, useState } from 'react'
-import { Layout, Menu, Input, Button, message } from 'antd'
+import { Layout, Menu, Dropdown, Button, Avatar, Typography } from 'antd'
 import {
   DashboardOutlined,
   BookOutlined,
   TeamOutlined,
-  SettingOutlined
+  LogoutOutlined,
+  UserOutlined
 } from '@ant-design/icons'
 import Overview from './pages/Overview'
 import Chapters from './pages/Chapters'
 import Students from './pages/Students'
+import Login from './pages/Login'
 import { getToken, setToken } from './api'
 
-const { Sider, Content } = Layout
+const { Sider, Content, Header } = Layout
+const { Text } = Typography
 
 const MENU = [
   { key: 'overview', icon: <DashboardOutlined />, label: '数据概览' },
   { key: 'chapters', icon: <BookOutlined />, label: '题库管理' },
-  { key: 'students', icon: <TeamOutlined />, label: '学员学习' },
-  { key: 'settings', icon: <SettingOutlined />, label: '后台设置' }
+  { key: 'students', icon: <TeamOutlined />, label: '学员学习' }
 ]
 
 export default function App() {
+  const [session, setSession] = useState(getToken() ? { token: getToken() } : null)
   const [tab, setTab] = useState('overview')
-  const [token, setTokenState] = useState(getToken())
 
   useEffect(() => {
-    if (token) setToken(token)
-  }, [])
+    if (!session) setToken('')
+  }, [session])
 
-  const saveToken = () => {
-    setToken(token)
-    message.success('管理口令已保存到本机')
+  if (!session) {
+    return <Login onSuccess={s => setSession(s)} />
+  }
+
+  const logout = () => {
+    setToken('')
+    setSession(null)
   }
 
   return (
@@ -51,25 +57,34 @@ export default function App() {
       </Sider>
 
       <Layout>
+        <Header
+          style={{
+            background: '#fff',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'flex-end',
+            gap: 12,
+            paddingInline: 24,
+            borderBottom: '1px solid #eef0f6',
+            height: 56
+          }}
+        >
+          <Dropdown
+            menu={{
+              items: [{ key: 'logout', icon: <LogoutOutlined />, label: '退出登录', onClick: logout }]
+            }}
+          >
+            <Button type='text'>
+              <Avatar size={24} icon={<UserOutlined />} style={{ marginRight: 8 }} />
+              <Text>管理员</Text>
+            </Button>
+          </Dropdown>
+        </Header>
+
         <Content style={{ padding: 24 }}>
           {tab === 'overview' && <Overview goTo={setTab} />}
           {tab === 'chapters' && <Chapters />}
           {tab === 'students' && <Students />}
-          {tab === 'settings' && (
-            <div style={{ background: '#fff', padding: 24, borderRadius: 14, maxWidth: 560 }}>
-              <h3 className='page-title'>后台设置</h3>
-              <p className='page-sub'>管理口令用于新增/修改/删除题库，保存在本机浏览器</p>
-              <Input
-                placeholder='管理口令，例如 xiaoyu'
-                value={token}
-                onChange={e => setTokenState(e.target.value)}
-                style={{ marginBottom: 12 }}
-              />
-              <Button type='primary' onClick={saveToken}>
-                保存口令
-              </Button>
-            </div>
-          )}
         </Content>
       </Layout>
     </Layout>

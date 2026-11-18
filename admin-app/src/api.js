@@ -20,6 +20,15 @@ async function handle(res, fallback) {
   return res.json().catch(() => ({}))
 }
 
+export async function adminLogin(username, password) {
+  const res = await fetch(`${BASE}/api/admin/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password })
+  })
+  return handle(res, '账号或口令不对')
+}
+
 export async function fetchChapters() {
   const res = await fetch(`${BASE}/api/chapters?full=1`)
   return handle(res, '题库读取失败')

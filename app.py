@@ -152,6 +152,21 @@ def _write_units(units):
     os.replace(tmp, DATA_FILE)
 
 
+ADMIN_USER = os.getenv("ADMIN_USER", "admin")
+ADMIN_PASS = os.getenv("ADMIN_PASS", ADMIN_TOKEN)
+
+
+@app.post("/api/admin/login")
+async def api_admin_login(request: Request):
+    """管理后台登录：只保留一个管理员账号（可用环境变量改）"""
+    body = await request.json()
+    username = (body.get("username") or "").strip()
+    password = (body.get("password") or "").strip()
+    if username != ADMIN_USER or password != ADMIN_PASS:
+        raise HTTPException(status_code=401, detail="账号或口令不对")
+    return {"ok": True, "token": ADMIN_TOKEN, "username": ADMIN_USER}
+
+
 def _check_token(token):
     if not token or token != ADMIN_TOKEN:
         raise HTTPException(status_code=401, detail="token 不对")
