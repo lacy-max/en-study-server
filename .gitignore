@@ -9,3 +9,4 @@ admin-app/node_modules/
 admin-app/dist/
 data/app.db
 models/
+.env

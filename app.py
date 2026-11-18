@@ -1,3 +1,25 @@
+import os
+
+
+def load_dotenv_lite(path=None):
+    """极简 .env 读取（没有 python-dotenv 依赖）：KEY=VALUE 一行一个"""
+    path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+    except Exception:
+        pass
+
+
+load_dotenv_lite()
+
 """
 英语闯关 TTS 代理（免费，无需任何 API Key）
 
