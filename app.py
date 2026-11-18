@@ -229,12 +229,280 @@ async def api_chapter_reorder(request: Request, x_admin_token: Optional[str] = H
     return {"ok": True}
 
 
+# ================= 用户账号 + 学习进度（SQLite，无额外依赖） =================
+import sqlite3
+import uuid
+from time import time as _now_ts
+
+DB_FILE = os.getenv("DB_FILE", os.path.join(DATA_DIR, "app.db"))
+USER_SECRET = os.getenv("USER_TOKEN_SECRET", "en-study-user-secret")
+
+
+def _db():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _init_db():
+    conn = _db()
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS users(
+            uid TEXT PRIMARY KEY,
+            name TEXT UNIQUE NOT NULL,
+            code_hash TEXT NOT NULL,
+            created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS progress(
+            uid TEXT NOT NULL,
+            chapter_id TEXT NOT NULL,
+            max_score REAL DEFAULT 0,
+            done_days TEXT DEFAULT '[]',
+            last_study_at INTEGER DEFAULT 0,
+            PRIMARY KEY (uid, chapter_id)
+        );
+        CREATE TABLE IF NOT EXISTS wrongbook(
+            uid TEXT NOT NULL,
+            en TEXT NOT NULL,
+            zh TEXT DEFAULT '',
+            chapter_id TEXT DEFAULT '',
+            at INTEGER DEFAULT 0,
+            PRIMARY KEY (uid, en)
+        );
+        CREATE TABLE IF NOT EXISTS settings(
+            uid TEXT PRIMARY KEY,
+            data TEXT DEFAULT '{}'
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+_init_db()
+
+
+def _hash_code(code: str) -> str:
+    return hashlib.sha256(("code:" + code).encode("utf-8")).hexdigest()
+
+
+def _make_token(uid: str) -> str:
+    sig = hashlib.sha256((uid + USER_SECRET).encode("utf-8")).hexdigest()[:20]
+    return f"{uid}.{sig}"
+
+
+def _uid_from_token(token: Optional[str]) -> str:
+    if not token or "." not in token:
+        raise HTTPException(status_code=401, detail="请先登录")
+    uid, sig = token.rsplit(".", 1)
+    if _make_token(uid).split(".")[1] != sig:
+        raise HTTPException(status_code=401, detail="登录已失效，请重新登录")
+    return uid
+
+
+def _progress_map(uid: str) -> dict:
+    conn = _db()
+    rows = conn.execute("SELECT * FROM progress WHERE uid=?", (uid,)).fetchall()
+    conn.close()
+    out = {}
+    for r in rows:
+        try:
+            days = json.loads(r["done_days"] or "[]")
+        except Exception:
+            days = []
+        out[r["chapter_id"]] = {
+            "maxScore": r["max_score"] or 0,
+            "doneDays": days,
+            "lastStudyAt": r["last_study_at"] or 0,
+        }
+    return out
+
+
+@app.post("/api/login")
+async def api_login(request: Request):
+    """昵称 + 口令登录；昵称不存在则自动注册"""
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    code = (body.get("code") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="请填写昵称")
+    if len(name) > 20:
+        raise HTTPException(status_code=400, detail="昵称最多 20 个字")
+    if len(code) < 4:
+        raise HTTPException(status_code=400, detail="口令至少 4 位")
+
+    conn = _db()
+    row = conn.execute("SELECT * FROM users WHERE name=?", (name,)).fetchone()
+    if row:
+        if row["code_hash"] != _hash_code(code):
+            conn.close()
+            raise HTTPException(status_code=401, detail="口令不对")
+        uid = row["uid"]
+    else:
+        uid = uuid.uuid4().hex[:16]
+        conn.execute(
+            "INSERT INTO users(uid,name,code_hash,created_at) VALUES(?,?,?,?)",
+            (uid, name, _hash_code(code), _now_ts()),
+        )
+        conn.commit()
+    conn.close()
+    return {"uid": uid, "name": name, "token": _make_token(uid)}
+
+
+@app.get("/api/me")
+def api_me(x_token: Optional[str] = Header(None)):
+    uid = _uid_from_token(x_token)
+    conn = _db()
+    row = conn.execute("SELECT name FROM users WHERE uid=?", (uid,)).fetchone()
+    conn.close()
+    return {"uid": uid, "name": row["name"] if row else ""}
+
+
+@app.get("/api/progress")
+def api_progress_get(x_token: Optional[str] = Header(None)):
+    uid = _uid_from_token(x_token)
+    conn = _db()
+    try:
+        settings = json.loads(
+            (conn.execute("SELECT data FROM settings WHERE uid=?", (uid,)).fetchone() or {"data": "{}"})["data"] or "{}"
+        )
+    except Exception:
+        settings = {}
+    wrong = [
+        {"en": r["en"], "zh": r["zh"], "chapterId": r["chapter_id"], "at": r["at"]}
+        for r in conn.execute("SELECT * FROM wrongbook WHERE uid=? ORDER BY at DESC LIMIT 100", (uid,)).fetchall()
+    ]
+    conn.close()
+    return {"progress": _progress_map(uid), "wrong": wrong, "settings": settings}
+
+
+@app.post("/api/progress")
+async def api_progress_save(request: Request, x_token: Optional[str] = Header(None)):
+    uid = _uid_from_token(x_token)
+    body = await request.json()
+    chapter_id = body.get("chapterId")
+    if not chapter_id:
+        raise HTTPException(status_code=400, detail="缺少 chapterId")
+    patch = body.get("patch") or {}
+    conn = _db()
+    row = conn.execute(
+        "SELECT * FROM progress WHERE uid=? AND chapter_id=?", (uid, chapter_id)
+    ).fetchone()
+    max_score = row["max_score"] if row else 0
+    done_days = json.loads(row["done_days"]) if row else []
+    last_at = row["last_study_at"] if row else 0
+    if patch.get("maxScore") is not None:
+        max_score = max(max_score, patch["maxScore"])
+    if patch.get("doneDays"):
+        for d in patch["doneDays"]:
+            if d not in done_days:
+                done_days.append(d)
+    last_at = int(_now_ts() * 1000)
+    conn.execute(
+        "INSERT OR REPLACE INTO progress(uid,chapter_id,max_score,done_days,last_study_at) VALUES(?,?,?,?,?)",
+        (uid, chapter_id, max_score, json.dumps(done_days, ensure_ascii=False), last_at),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "progress": _progress_map(uid).get(chapter_id)}
+
+
+@app.post("/api/wrong")
+async def api_wrong_add(request: Request, x_token: Optional[str] = Header(None)):
+    uid = _uid_from_token(x_token)
+    body = await request.json()
+    en = (body.get("en") or "").strip()
+    if not en:
+        raise HTTPException(status_code=400, detail="缺少 en")
+    conn = _db()
+    conn.execute(
+        "INSERT OR REPLACE INTO wrongbook(uid,en,zh,chapter_id,at) VALUES(?,?,?,?,?)",
+        (uid, en, body.get("zh") or "", body.get("chapterId") or "", int(_now_ts() * 1000)),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.delete("/api/wrong")
+def api_wrong_clear(x_token: Optional[str] = Header(None)):
+    uid = _uid_from_token(x_token)
+    conn = _db()
+    conn.execute("DELETE FROM wrongbook WHERE uid=?", (uid,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/settings")
+async def api_settings_save(request: Request, x_token: Optional[str] = Header(None)):
+    uid = _uid_from_token(x_token)
+    body = await request.json()
+    conn = _db()
+    conn.execute(
+        "INSERT OR REPLACE INTO settings(uid,data) VALUES(?,?)",
+        (uid, json.dumps(body, ensure_ascii=False)),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.get("/api/users")
+def api_users(x_admin_token: Optional[str] = Header(None)):
+    """管理端：查看所有学员及学习情况"""
+    _check_token(x_admin_token)
+    conn = _db()
+    users = conn.execute("SELECT * FROM users ORDER BY created_at DESC").fetchall()
+    rows = conn.execute("SELECT * FROM progress").fetchall()
+    by_uid = {}
+    for r in rows:
+        by_uid.setdefault(r["uid"], []).append(r)
+    out = []
+    for u in users:
+        items = by_uid.get(u["uid"], [])
+        out.append(
+            {
+                "uid": u["uid"],
+                "name": u["name"],
+                "createdAt": u["created_at"],
+                "chapterCount": len([i for i in items if (i["max_score"] or 0) > 0]),
+                "lastStudyAt": max([i["last_study_at"] or 0 for i in items], default=0),
+                "chapters": {i["chapter_id"]: i["max_score"] for i in items},
+            }
+        )
+    conn.close()
+    return JSONResponse(out)
+
+
+@app.delete("/api/users/{uid}")
+def api_user_delete(uid: str, x_admin_token: Optional[str] = Header(None)):
+    _check_token(x_admin_token)
+    conn = _db()
+    conn.execute("DELETE FROM users WHERE uid=?", (uid,))
+    conn.execute("DELETE FROM progress WHERE uid=?", (uid,))
+    conn.execute("DELETE FROM wrongbook WHERE uid=?", (uid,))
+    conn.execute("DELETE FROM settings WHERE uid=?", (uid,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+# ===== 管理后台（React + Ant Design，构建产物 admin-app/dist） =====
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
+
+ADMIN_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin-app", "dist")
+
+
 @app.get("/admin")
-def admin_page():
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin", "index.html")
-    if os.path.exists(path):
-        return FileResponse(path)
-    return Response(status_code=404, content=b"admin page missing")
+def admin_redirect():
+    return RedirectResponse(url="/admin/")
+
+
+if os.path.isdir(ADMIN_DIST):
+    app.mount("/admin", StaticFiles(directory=ADMIN_DIST, html=True), name="admin")
 
 
 if __name__ == "__main__":
