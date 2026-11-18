@@ -10,7 +10,7 @@ import json
 import os
 import sys
 
-MODEL_SIZE = os.environ.get("ASR_MODEL", "tiny.en")
+MODEL_SIZE = os.environ.get("ASR_MODEL", "base.en")
 
 _model = None
 
@@ -29,14 +29,16 @@ def get_model():
     return _model
 
 
-def transcribe(path, language="en"):
+def transcribe(path, language="en", prompt=None):
+    """prompt 用来“提示”当前要听的目标词，能显著提升儿童短句的准确率"""
     model = get_model()
     segments, _info = model.transcribe(
         path,
         language=language,
-        beam_size=1,
+        beam_size=3,
         vad_filter=True,
         condition_on_previous_text=False,
+        initial_prompt=prompt or None,
     )
     text = "".join(seg.text for seg in segments).strip()
     return text
@@ -46,11 +48,20 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--serve":
         # 常驻模式：每行一个音频路径，输出一行 JSON（模型只加载一次）
         for line in sys.stdin:
-            audio = line.strip()
-            if not audio:
+            raw = line.strip()
+            if not raw:
                 continue
+            audio = raw
+            prompt = None
+            if raw.startswith("{"):
+                try:
+                    req = json.loads(raw)
+                    audio = req.get("path") or ""
+                    prompt = req.get("prompt") or None
+                except Exception:
+                    continue
             try:
-                result = transcribe(audio, "en")
+                result = transcribe(audio, "en", prompt)
                 print(json.dumps({"text": result, "ok": True}, ensure_ascii=False), flush=True)
             except Exception as e:  # noqa
                 print(json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False), flush=True)

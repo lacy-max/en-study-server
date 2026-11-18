@@ -494,10 +494,11 @@ def _asr_start():
     return _asr_proc
 
 
-def _asr_transcribe(path: str) -> str:
+def _asr_transcribe(path: str, prompt: Optional[str] = None) -> str:
     with _asr_lock:
         proc = _asr_start()
-        proc.stdin.write(path + "\n")
+        payload = json.dumps({"path": path, "prompt": prompt or None}, ensure_ascii=False)
+        proc.stdin.write(payload + "\n")
         proc.stdin.flush()
         line = proc.stdout.readline()
         if not line:
@@ -508,9 +509,86 @@ def _asr_transcribe(path: str) -> str:
         return data.get("text", "")
 
 
+# ---------------- 百度智能云短语音识别（英文，dev_pid=1737） ----------------
+BAIDU_ASR_KEY = os.getenv("BAIDU_ASR_KEY", "")
+BAIDU_ASR_SECRET = os.getenv("BAIDU_ASR_SECRET", "")
+_baidu_cache = {"token": "", "exp": 0}
+
+
+def _baidu_token() -> str:
+    import time
+    import urllib.parse
+    import urllib.request
+
+    if _baidu_cache["token"] and _baidu_cache["exp"] > time.time() + 60:
+        return _baidu_cache["token"]
+    params = urllib.parse.urlencode(
+        {
+            "grant_type": "client_credentials",
+            "client_id": BAIDU_ASR_KEY,
+            "client_secret": BAIDU_ASR_SECRET,
+        }
+    )
+    url = "https://aip.baidubce.com/oauth/2.0/token?" + params
+    req = urllib.request.Request(url, method="POST")
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    token = data.get("access_token")
+    if not token:
+        raise HTTPException(status_code=503, detail="百度语音 token 获取失败")
+    _baidu_cache["token"] = token
+    _baidu_cache["exp"] = time.time() + int(data.get("expires_in", 2592000))
+    return token
+
+
+def _baidu_asr(wav_path: str) -> str:
+    import base64
+    import urllib.request
+
+    with open(wav_path, "rb") as f:
+        raw = f.read()
+    payload = {
+        "format": "wav",
+        "rate": 16000,
+        "channel": 1,
+        "cuid": "en-study-web",
+        "token": _baidu_token(),
+        "dev_pid": 1737,  # 英语模型
+        "speech": base64.b64encode(raw).decode("utf-8"),
+        "len": len(raw),
+    }
+    req = urllib.request.Request(
+        "https://vop.baidu.com/server_api",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    if data.get("err_no") != 0:
+        raise HTTPException(
+            status_code=503, detail="百度识别失败：%s" % data.get("err_msg", "unknown")
+        )
+    return "".join(data.get("result") or []).strip()
+
+
+def _norm_asr(v) -> str:
+    raw = str(v or "").lower()
+    keep = "".join(ch for ch in raw if ch.isalnum() or ch in " '")
+    return " ".join(keep.split())
+
+
+def _baidu_ready() -> bool:
+    return bool(BAIDU_ASR_KEY and BAIDU_ASR_SECRET)
+
+
 @app.post("/api/asr")
-async def api_asr(request: Request):
-    """上传一段录音（原始二进制），返回识别出的英文（小朋友不用打字）"""
+async def api_asr(request: Request, expect: Optional[str] = Query(None)):
+    """上传一段录音（原始二进制），返回识别出的英文（小朋友不用打字）
+
+    expect：本次要说的目标词，用于结果相似度判定（本地模型还会当提示词用）
+    识别引擎：配置了百度密钥走百度智能云，否则回退本地 whisper
+    """
     ctype = (request.headers.get("content-type") or "").lower()
     suffix_map = {
         "audio/webm": ".webm",
@@ -530,20 +608,53 @@ async def api_asr(request: Request):
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     tmp.write(raw)
     tmp.close()
+    engine = "whisper"
     try:
-        text = _asr_transcribe(tmp.name)
+        if _baidu_ready():
+            engine = "baidu"
+            # 百度要求 16k / 16bit / 单声道 wav，先转码
+            wav_path = tmp.name + ".wav"
+            conv = subprocess.run(
+                [ASR_PYTHON, os.path.join(os.path.dirname(ASR_SCRIPT), "to_wav.py"), tmp.name, wav_path],
+                capture_output=True,
+                timeout=30,
+            )
+            if conv.returncode != 0:
+                raise HTTPException(status_code=503, detail="录音转码失败")
+            try:
+                text = _baidu_asr(wav_path)
+            finally:
+                try:
+                    os.unlink(wav_path)
+                except Exception:
+                    pass
+        else:
+            text = _asr_transcribe(tmp.name, expect)
     finally:
         try:
             os.unlink(tmp.name)
         except Exception:
             pass
-    return {"ok": True, "text": text}
+
+    # 相似度判定：孩子说得含糊一点也算对
+    match = None
+    score = 0.0
+    if expect:
+        import difflib
+
+        a, b = _norm_asr(text), _norm_asr(expect)
+        if a and b:
+            score = difflib.SequenceMatcher(None, a, b).ratio()
+            if b in a or score >= 0.75:
+                match = expect
+                score = max(score, 0.9)
+    return {"ok": True, "text": text, "match": match, "score": round(score, 2), "engine": engine}
 
 
 @app.get("/api/asr/status")
 def api_asr_status():
-    ready = os.path.exists(ASR_PYTHON) and os.path.exists(ASR_SCRIPT)
-    return {"ok": True, "enabled": ready}
+    ready = _baidu_ready() or (os.path.exists(ASR_PYTHON) and os.path.exists(ASR_SCRIPT))
+    return {"ok": True, "enabled": ready, "engine": "baidu" if _baidu_ready() else "whisper"}
 
 
 @app.get("/api/users")
