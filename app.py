@@ -464,6 +464,88 @@ async def api_settings_save(request: Request, x_token: Optional[str] = Header(No
     return {"ok": True}
 
 
+# ---------------- 语音识别（本地 whisper，儿童单词朗读） ----------------
+import subprocess
+import tempfile
+
+ASR_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "asr_worker.py")
+ASR_PYTHON = os.getenv("ASR_PYTHON") or os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "asr-venv", "bin", "python"
+)
+_asr_proc = None
+_asr_lock = threading.Lock()
+
+
+def _asr_start():
+    """常驻子进程：模型只加载一次，后续识别 0.3~0.8s"""
+    global _asr_proc
+    if _asr_proc is not None and _asr_proc.poll() is None:
+        return _asr_proc
+    if not os.path.exists(ASR_PYTHON) or not os.path.exists(ASR_SCRIPT):
+        raise HTTPException(status_code=503, detail="语音识别未安装")
+    _asr_proc = subprocess.Popen(
+        [ASR_PYTHON, ASR_SCRIPT, "--serve"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        bufsize=1,
+    )
+    return _asr_proc
+
+
+def _asr_transcribe(path: str) -> str:
+    with _asr_lock:
+        proc = _asr_start()
+        proc.stdin.write(path + "\n")
+        proc.stdin.flush()
+        line = proc.stdout.readline()
+        if not line:
+            raise HTTPException(status_code=503, detail="语音识别进程异常")
+        data = json.loads(line)
+        if not data.get("ok"):
+            raise HTTPException(status_code=503, detail="语音识别失败")
+        return data.get("text", "")
+
+
+@app.post("/api/asr")
+async def api_asr(request: Request):
+    """上传一段录音（原始二进制），返回识别出的英文（小朋友不用打字）"""
+    ctype = (request.headers.get("content-type") or "").lower()
+    suffix_map = {
+        "audio/webm": ".webm",
+        "audio/ogg": ".ogg",
+        "audio/mp4": ".m4a",
+        "audio/m4a": ".m4a",
+        "audio/mpeg": ".mp3",
+        "audio/wav": ".wav",
+        "audio/x-wav": ".wav",
+    }
+    suffix = next((v for k, v in suffix_map.items() if k in ctype), ".webm")
+    raw = await request.body()
+    if not raw:
+        raise HTTPException(status_code=400, detail="缺少录音数据")
+    if len(raw) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="录音太长")
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmp.write(raw)
+    tmp.close()
+    try:
+        text = _asr_transcribe(tmp.name)
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except Exception:
+            pass
+    return {"ok": True, "text": text}
+
+
+@app.get("/api/asr/status")
+def api_asr_status():
+    ready = os.path.exists(ASR_PYTHON) and os.path.exists(ASR_SCRIPT)
+    return {"ok": True, "enabled": ready}
+
+
 @app.get("/api/users")
 def api_users(x_admin_token: Optional[str] = Header(None)):
     """管理端：查看所有学员及学习情况"""
