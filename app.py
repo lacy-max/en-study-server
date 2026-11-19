@@ -289,6 +289,7 @@ def _init_db():
             uid TEXT PRIMARY KEY,
             name TEXT UNIQUE NOT NULL,
             code_hash TEXT NOT NULL,
+            phone TEXT DEFAULT '',
             created_at TEXT
         );
         CREATE TABLE IF NOT EXISTS progress(
@@ -355,6 +356,17 @@ def _uid_from_token(token: Optional[str]) -> str:
     return uid
 
 
+def _ensure_user_phone_col(conn):
+    """老库补 phone 列（已有用户不受影响）"""
+    try:
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
+        if "phone" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN phone TEXT DEFAULT ''")
+            conn.commit()
+    except Exception:
+        pass
+
+
 def _ensure_progress_modes_col(conn):
     try:
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(progress)").fetchall()]
@@ -419,6 +431,9 @@ async def api_login(request: Request):
     body = await request.json()
     name = (body.get("name") or "").strip()
     code = (body.get("code") or "").strip()
+    phone = (body.get("phone") or "").strip()
+    if phone and (not phone.isdigit() or len(phone) != 11):
+        raise HTTPException(status_code=400, detail="手机号要 11 位数字")
     if not name:
         raise HTTPException(status_code=400, detail="请填写昵称")
     if len(name) > 20:
@@ -427,17 +442,21 @@ async def api_login(request: Request):
         raise HTTPException(status_code=400, detail="口令至少 4 位")
 
     conn = _db()
+    _ensure_user_phone_col(conn)
     row = conn.execute("SELECT * FROM users WHERE name=?", (name,)).fetchone()
     if row:
         if row["code_hash"] != _hash_code(code):
             conn.close()
             raise HTTPException(status_code=401, detail="口令不对")
         uid = row["uid"]
+        if phone and (row["phone"] or "") != phone:
+            conn.execute("UPDATE users SET phone=? WHERE uid=?", (phone, uid))
+            conn.commit()
     else:
         uid = uuid.uuid4().hex[:16]
         conn.execute(
-            "INSERT INTO users(uid,name,code_hash,created_at) VALUES(?,?,?,?)",
-            (uid, name, _hash_code(code), _now_ts()),
+            "INSERT INTO users(uid,name,code_hash,phone,created_at) VALUES(?,?,?,?,?)",
+            (uid, name, _hash_code(code), phone, _now_ts()),
         )
         conn.commit()
     conn.close()
@@ -448,9 +467,10 @@ async def api_login(request: Request):
 def api_me(x_token: Optional[str] = Header(None)):
     uid = _uid_from_token(x_token)
     conn = _db()
-    row = conn.execute("SELECT name FROM users WHERE uid=?", (uid,)).fetchone()
+    _ensure_user_phone_col(conn)
+    row = conn.execute("SELECT name, phone FROM users WHERE uid=?", (uid,)).fetchone()
     conn.close()
-    return {"uid": uid, "name": row["name"] if row else ""}
+    return {"uid": uid, "name": row["name"] if row else "", "phone": (row["phone"] or "") if row else ""}
 
 
 @app.get("/api/progress")
