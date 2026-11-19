@@ -1,8 +1,7 @@
 import React, { useEffect, useState } from 'react'
-import { Table, Button, Tag, message, Popconfirm, Space, Typography } from 'antd'
+import { Table, Button, Tag, message, Popconfirm, Space } from 'antd'
 import { fetchFeedback, removeFeedback } from '../api'
 
-const { Paragraph } = Typography
 
 function fmt(v) {
   if (!v) return '—'
@@ -65,7 +64,7 @@ export default function Feedback() {
     {
       title: '反馈内容',
       dataIndex: 'text',
-      render: v => <Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}>{v}</Paragraph>
+      render: v => <span style={{ display: 'block', whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>{v}</span>
     },
     {
       title: '操作',
@@ -89,6 +88,7 @@ export default function Feedback() {
         loading={loading}
         columns={columns}
         dataSource={rows}
+        scroll={{ x: 860 }}
         pagination={{ pageSize: 10, showSizeChanger: false }}
         locale={{ emptyText: '还没有用户反馈' }}
       />
