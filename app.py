@@ -790,6 +790,32 @@ def api_asr_status():
     return {"ok": True, "enabled": ready, "engine": "baidu" if _baidu_ready() else "whisper"}
 
 
+@app.get("/api/feedback/list")
+def api_feedback_list(x_admin_token: Optional[str] = Header(None)):
+    """后台：用户意见反馈列表（新的在前）"""
+    _check_token(x_admin_token)
+    conn = _db()
+    try:
+        rows = conn.execute(
+            "SELECT id, uid, name, text, at, created_at FROM feedback ORDER BY id DESC LIMIT 500"
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+@app.delete("/api/feedback/{fid}")
+def api_feedback_delete(fid: int, x_admin_token: Optional[str] = Header(None)):
+    _check_token(x_admin_token)
+    conn = _db()
+    try:
+        conn.execute("DELETE FROM feedback WHERE id=?", (fid,))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
 @app.get("/api/users")
 def api_users(x_admin_token: Optional[str] = Header(None)):
     """管理端：查看所有学员及学习情况"""

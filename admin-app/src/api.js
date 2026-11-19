@@ -73,4 +73,17 @@ export async function removeStudent(uid) {
   return handle(res, '删除失败')
 }
 
+export async function fetchFeedback() {
+  const res = await fetch(`${BASE}/api/feedback/list`, { headers: adminHeaders() })
+  return handle(res, '口令不对或读取失败')
+}
+
+export async function removeFeedback(fid) {
+  const res = await fetch(`${BASE}/api/feedback/${fid}`, {
+    method: 'DELETE',
+    headers: adminHeaders()
+  })
+  return handle(res, '删除失败')
+}
+
 export const ADMIN_BASE = BASE

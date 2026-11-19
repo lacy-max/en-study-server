@@ -4,12 +4,14 @@ import {
   DashboardOutlined,
   BookOutlined,
   TeamOutlined,
+  MessageOutlined,
   LogoutOutlined,
   UserOutlined
 } from '@ant-design/icons'
 import Overview from './pages/Overview'
 import Chapters from './pages/Chapters'
 import Students from './pages/Students'
+import Feedback from './pages/Feedback'
 import Login from './pages/Login'
 import { getToken, setToken } from './api'
 
@@ -19,7 +21,8 @@ const { Text } = Typography
 const MENU = [
   { key: 'overview', icon: <DashboardOutlined />, label: '数据概览' },
   { key: 'chapters', icon: <BookOutlined />, label: '题库管理' },
-  { key: 'students', icon: <TeamOutlined />, label: '学员学习' }
+  { key: 'students', icon: <TeamOutlined />, label: '学员学习' },
+  { key: 'feedback', icon: <MessageOutlined />, label: '意见反馈' }
 ]
 
 export default function App() {
@@ -85,6 +88,7 @@ export default function App() {
           {tab === 'overview' && <Overview goTo={setTab} />}
           {tab === 'chapters' && <Chapters />}
           {tab === 'students' && <Students />}
+          {tab === 'feedback' && <Feedback />}
         </Content>
       </Layout>
     </Layout>
