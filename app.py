@@ -320,6 +320,14 @@ def _init_db():
             uid TEXT PRIMARY KEY,
             data TEXT DEFAULT '{}'
         );
+        CREATE TABLE IF NOT EXISTS feedback(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            uid TEXT DEFAULT '',
+            name TEXT DEFAULT '',
+            text TEXT NOT NULL,
+            at INTEGER DEFAULT 0,
+            created_at INTEGER DEFAULT 0
+        );
         """
     )
     conn.commit()
@@ -379,6 +387,30 @@ def _progress_map(uid: str) -> dict:
             "lastStudyAt": r["last_study_at"] or 0,
         }
     return out
+
+
+@app.post("/api/feedback")
+async def api_feedback(request: Request, x_token: Optional[str] = Header(None)):
+    """用户意见反馈：存库，后台管理页可查"""
+    uid = _uid_from_token(x_token) or ""
+    body = await request.json()
+    text = (body.get("text") or "").strip()[:500]
+    if not text:
+        raise HTTPException(status_code=400, detail="反馈内容不能为空")
+    name = ""
+    conn = _db()
+    try:
+        row = conn.execute("SELECT name FROM users WHERE uid=?", (uid,)).fetchone()
+        if row:
+            name = row["name"] or ""
+        conn.execute(
+            "INSERT INTO feedback(uid, name, text, at, created_at) VALUES (?,?,?,?,?)",
+            (uid, name, text, int(body.get("at") or 0), int(_now_ts() * 1000)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True}
 
 
 @app.post("/api/login")
