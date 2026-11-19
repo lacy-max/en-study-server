@@ -21,7 +21,7 @@ const { Text } = Typography
 const MENU = [
   { key: 'overview', icon: <DashboardOutlined />, label: '数据概览' },
   { key: 'chapters', icon: <BookOutlined />, label: '题库管理' },
-  { key: 'students', icon: <TeamOutlined />, label: '学员学习' },
+  { key: 'students', icon: <TeamOutlined />, label: '学员列表' },
   { key: 'feedback', icon: <MessageOutlined />, label: '意见反馈' }
 ]
 

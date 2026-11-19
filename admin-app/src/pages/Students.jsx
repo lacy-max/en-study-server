@@ -36,6 +36,25 @@ export default function Students() {
       render: v => <b>{v}</b>
     },
     {
+      title: '手机号',
+      dataIndex: 'phone',
+      width: 150,
+      render: v => v || <span style={{ color: '#b0b6cc' }}>未填</span>
+    },
+    {
+      title: '性别',
+      dataIndex: 'gender',
+      width: 90,
+      render: v =>
+        v === 'girl' ? (
+          <Tag color='magenta'>👧 女孩</Tag>
+        ) : v === 'boy' ? (
+          <Tag color='blue'>👦 男孩</Tag>
+        ) : (
+          <span style={{ color: '#b0b6cc' }}>未选</span>
+        )
+    },
+    {
       title: '已学单元',
       dataIndex: 'chapterCount',
       width: 120,
@@ -89,15 +108,15 @@ export default function Students() {
 
   return (
     <div>
-      <h3 className='page-title'>学员学习情况</h3>
-      <p className='page-sub'>学员在手机端登录后，进度自动上报到这里</p>
+      <h3 className='page-title'>学员列表</h3>
+      <p className='page-sub'>学员在手机端登录后，资料与进度自动同步到这里</p>
       <Button onClick={load} loading={loading} style={{ marginBottom: 16 }}>
         刷新
       </Button>
       <Table
         rowKey='uid'
         dataSource={rows}
-        scroll={{ x: 900 }}
+        scroll={{ x: 1140 }}
         columns={columns}
         loading={loading}
         pagination={false}

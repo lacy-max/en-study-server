@@ -937,6 +937,8 @@ def api_users(x_admin_token: Optional[str] = Header(None)):
     """管理端：查看所有学员及学习情况"""
     _check_token(x_admin_token)
     conn = _db()
+    _ensure_user_phone_col(conn)
+    _ensure_user_gender_col(conn)
     users = conn.execute("SELECT * FROM users ORDER BY created_at DESC").fetchall()
     rows = conn.execute("SELECT * FROM progress").fetchall()
     by_uid = {}
@@ -949,6 +951,8 @@ def api_users(x_admin_token: Optional[str] = Header(None)):
             {
                 "uid": u["uid"],
                 "name": u["name"],
+                "phone": (u["phone"] or "") if "phone" in u.keys() else "",
+                "gender": (u["gender"] or "") if "gender" in u.keys() else "",
                 "createdAt": u["created_at"],
                 "chapterCount": len([i for i in items if (i["max_score"] or 0) > 0]),
                 "lastStudyAt": max([i["last_study_at"] or 0 for i in items], default=0),
