@@ -374,6 +374,17 @@ def _ensure_user_phone_col(conn):
         pass
 
 
+def _ensure_user_gender_col(conn):
+    """老库补 gender 列：空字符串=还没选过"""
+    try:
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
+        if "gender" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN gender TEXT DEFAULT ''")
+            conn.commit()
+    except Exception:
+        pass
+
+
 def _ensure_progress_modes_col(conn):
     try:
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(progress)").fetchall()]
@@ -450,6 +461,7 @@ async def api_login(request: Request):
 
     conn = _db()
     _ensure_user_phone_col(conn)
+    _ensure_user_gender_col(conn)
     row = conn.execute("SELECT * FROM users WHERE name=?", (name,)).fetchone()
     if row:
         if row["code_hash"] != _hash_code(code):
@@ -466,8 +478,9 @@ async def api_login(request: Request):
             (uid, name, _hash_code(code), phone, _now_ts()),
         )
         conn.commit()
+    gender = (row["gender"] or "") if row else ""
     conn.close()
-    return {"uid": uid, "name": name, "token": _make_token(uid)}
+    return {"uid": uid, "name": name, "token": _make_token(uid), "gender": gender}
 
 
 @app.get("/api/me")
@@ -475,9 +488,15 @@ def api_me(x_token: Optional[str] = Header(None)):
     uid = _uid_from_token(x_token)
     conn = _db()
     _ensure_user_phone_col(conn)
-    row = conn.execute("SELECT name, phone FROM users WHERE uid=?", (uid,)).fetchone()
+    _ensure_user_gender_col(conn)
+    row = conn.execute("SELECT name, phone, gender FROM users WHERE uid=?", (uid,)).fetchone()
     conn.close()
-    return {"uid": uid, "name": row["name"] if row else "", "phone": (row["phone"] or "") if row else ""}
+    return {
+        "uid": uid,
+        "name": row["name"] if row else "",
+        "phone": (row["phone"] or "") if row else "",
+        "gender": (row["gender"] or "") if row else "",
+    }
 
 
 @app.get("/api/progress")
@@ -622,6 +641,24 @@ async def api_settings_save(request: Request, x_token: Optional[str] = Header(No
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+@app.post("/api/gender")
+async def api_gender_save(request: Request, x_token: Optional[str] = Header(None)):
+    """首次登录时选性别：只写一次，之后登录不再问"""
+    uid = _uid_from_token(x_token)
+    body = await request.json()
+    gender = (body.get("gender") or "").strip()
+    if gender not in ("boy", "girl"):
+        raise HTTPException(status_code=400, detail="gender 只能是 boy 或 girl")
+    conn = _db()
+    try:
+        _ensure_user_gender_col(conn)
+        conn.execute("UPDATE users SET gender=? WHERE uid=?", (gender, uid))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "gender": gender}
 
 
 # ---------------- 语音识别（本地 whisper，儿童单词朗读） ----------------
