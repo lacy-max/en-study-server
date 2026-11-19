@@ -321,6 +321,13 @@ def _init_db():
             uid TEXT PRIMARY KEY,
             data TEXT DEFAULT '{}'
         );
+        CREATE TABLE IF NOT EXISTS user_cards(
+            uid TEXT NOT NULL,
+            card_id TEXT NOT NULL,
+            chapter_id TEXT DEFAULT '',
+            at INTEGER DEFAULT 0,
+            PRIMARY KEY (uid, card_id)
+        );
         CREATE TABLE IF NOT EXISTS feedback(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             uid TEXT DEFAULT '',
@@ -808,6 +815,58 @@ async def api_asr(request: Request, expect: Optional[str] = Query(None)):
 def api_asr_status():
     ready = _baidu_ready() or (os.path.exists(ASR_PYTHON) and os.path.exists(ASR_SCRIPT))
     return {"ok": True, "enabled": ready, "engine": "baidu" if _baidu_ready() else "whisper"}
+
+
+DOLL_IDS = ["doll%02d" % i for i in range(1, 9)]
+
+
+def _owned_dolls(conn, uid: str) -> list:
+    rows = conn.execute(
+        "SELECT card_id FROM user_cards WHERE uid=? ORDER BY at ASC", (uid,)
+    ).fetchall()
+    return [r["card_id"] for r in rows]
+
+
+@app.get("/api/cards")
+def api_cards(x_token: Optional[str] = Header(None)):
+    """我的娃娃卡（服务端保存，换手机也在）"""
+    uid = _uid_from_token(x_token)
+    conn = _db()
+    try:
+        owned = _owned_dolls(conn, uid)
+    finally:
+        conn.close()
+    return {"owned": owned}
+
+
+@app.post("/api/cards/award")
+async def api_cards_award(request: Request, x_token: Optional[str] = Header(None)):
+    """完成章节随机奖励一张娃娃卡：本章已发过则返回既有的，不重复发"""
+    uid = _uid_from_token(x_token)
+    body = await request.json()
+    chapter_id = (body.get("chapterId") or "").strip()
+    if not chapter_id:
+        raise HTTPException(status_code=400, detail="缺少 chapterId")
+    conn = _db()
+    try:
+        # 同一章只发一次
+        row = conn.execute(
+            "SELECT card_id FROM user_cards WHERE uid=? AND chapter_id=?", (uid, chapter_id)
+        ).fetchone()
+        if row:
+            return {"cardId": row["card_id"], "isNew": False, "owned": _owned_dolls(conn, uid)}
+        owned = _owned_dolls(conn, uid)
+        pool = [c for c in DOLL_IDS if c not in owned] or DOLL_IDS
+        import random
+        card_id = random.choice(pool)
+        conn.execute(
+            "INSERT INTO user_cards(uid, card_id, chapter_id, at) VALUES (?,?,?,?)",
+            (uid, card_id, chapter_id, int(_now_ts() * 1000)),
+        )
+        conn.commit()
+        return {"cardId": card_id, "isNew": True, "owned": _owned_dolls(conn, uid)}
+    finally:
+        conn.close()
 
 
 @app.get("/api/feedback/list")
