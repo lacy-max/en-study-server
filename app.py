@@ -40,6 +40,7 @@ import os
 from typing import Optional
 
 import json
+from datetime import datetime, timedelta
 import threading
 
 import edge_tts
@@ -321,6 +322,17 @@ def _init_db():
             uid TEXT PRIMARY KEY,
             data TEXT DEFAULT '{}'
         );
+        CREATE TABLE IF NOT EXISTS checkins(
+            uid TEXT NOT NULL,
+            day TEXT NOT NULL,
+            at INTEGER DEFAULT 0,
+            PRIMARY KEY (uid, day)
+        );
+        CREATE TABLE IF NOT EXISTS activity(
+            uid TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            at INTEGER DEFAULT 0
+        );
         CREATE TABLE IF NOT EXISTS user_cards(
             uid TEXT NOT NULL,
             card_id TEXT NOT NULL,
@@ -479,6 +491,14 @@ async def api_login(request: Request):
         )
         conn.commit()
     gender = (row["gender"] or "") if row else ""
+    try:
+        conn.execute(
+            "INSERT INTO activity(uid, kind, at) VALUES (?,?,?)",
+            (uid, "login", int(_now_ts() * 1000)),
+        )
+        conn.commit()
+    except Exception:
+        pass
     conn.close()
     return {"uid": uid, "name": name, "token": _make_token(uid), "gender": gender}
 
@@ -640,6 +660,84 @@ async def api_settings_save(request: Request, x_token: Optional[str] = Header(No
     )
     conn.commit()
     conn.close()
+    return {"ok": True}
+
+
+def _today_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _checkin_days(conn, uid: str) -> list:
+    rows = conn.execute(
+        "SELECT day FROM checkins WHERE uid=? ORDER BY day ASC", (uid,)
+    ).fetchall()
+    return [r["day"] for r in rows]
+
+
+def _streak(days: list) -> int:
+    """连续天数：从今天（或昨天）往前数"""
+    if not days:
+        return 0
+    ds = set(days)
+    d = datetime.now().date()
+    if d.isoformat() not in ds:
+        d = d - timedelta(days=1)
+    n = 0
+    while d.isoformat() in ds:
+        n += 1
+        d = d - timedelta(days=1)
+    return n
+
+
+@app.get("/api/checkin")
+def api_checkin_get(x_token: Optional[str] = Header(None)):
+    uid = _uid_from_token(x_token)
+    conn = _db()
+    try:
+        days = _checkin_days(conn, uid)
+    finally:
+        conn.close()
+    return {"days": days, "streak": _streak(days), "today": _today_str()}
+
+
+@app.post("/api/checkin")
+def api_checkin_post(x_token: Optional[str] = Header(None)):
+    """学完一节（单词或练习）就记一次打卡"""
+    uid = _uid_from_token(x_token)
+    day = _today_str()
+    conn = _db()
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM checkins WHERE uid=? AND day=?", (uid, day)
+        ).fetchone()
+        conn.execute(
+            "INSERT OR IGNORE INTO checkins(uid, day, at) VALUES (?,?,?)",
+            (uid, day, int(_now_ts() * 1000)),
+        )
+        conn.execute(
+            "INSERT INTO activity(uid, kind, at) VALUES (?,?,?)",
+            (uid, "study", int(_now_ts() * 1000)),
+        )
+        conn.commit()
+        days = _checkin_days(conn, uid)
+        return {"ok": True, "isNew": not exists, "days": days, "streak": _streak(days), "today": day}
+    finally:
+        conn.close()
+
+
+@app.post("/api/activity")
+def api_activity(x_token: Optional[str] = Header(None)):
+    """只记录学习活跃（用于后台活跃度），不打卡"""
+    uid = _uid_from_token(x_token)
+    conn = _db()
+    try:
+        conn.execute(
+            "INSERT INTO activity(uid, kind, at) VALUES (?,?,?)",
+            (uid, "study", int(_now_ts() * 1000)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
     return {"ok": True}
 
 
@@ -944,9 +1042,35 @@ def api_users(x_admin_token: Optional[str] = Header(None)):
     by_uid = {}
     for r in rows:
         by_uid.setdefault(r["uid"], []).append(r)
+    acts = conn.execute("SELECT uid, kind, MAX(at) AS last FROM activity GROUP BY uid, kind").fetchall()
+    last_login = {}
+    last_study = {}
+    for a in acts:
+        if a["kind"] == "login":
+            last_login[a["uid"]] = a["last"] or 0
+        else:
+            last_study[a["uid"]] = a["last"] or 0
+
+    now_ms = int(_now_ts() * 1000)
+    day_ms = 86400000
+
+    def status_of(uid, progress_last):
+        # 活跃：最近 7 天有学习（单词/练习）
+        study_at = max(last_study.get(uid, 0), progress_last or 0)
+        login_at = last_login.get(uid, 0)
+        if study_at and now_ms - study_at <= 7 * day_ms:
+            return "active", study_at
+        # 半活跃：最近 7 天只是登录，没学习
+        if login_at and now_ms - login_at <= 7 * day_ms:
+            return "half", study_at
+        # 不活跃：7 天内既没学习也没登录
+        return "silent", study_at
+
     out = []
     for u in users:
         items = by_uid.get(u["uid"], [])
+        progress_last = max([i["last_study_at"] or 0 for i in items], default=0)
+        st, study_at = status_of(u["uid"], progress_last)
         out.append(
             {
                 "uid": u["uid"],
@@ -954,8 +1078,10 @@ def api_users(x_admin_token: Optional[str] = Header(None)):
                 "phone": (u["phone"] or "") if "phone" in u.keys() else "",
                 "gender": (u["gender"] or "") if "gender" in u.keys() else "",
                 "createdAt": u["created_at"],
+                "status": st,
+                "lastStudyAt": int(study_at) if study_at else 0,
+                "lastLoginAt": last_login.get(u["uid"], 0),
                 "chapterCount": len([i for i in items if (i["max_score"] or 0) > 0]),
-                "lastStudyAt": max([i["last_study_at"] or 0 for i in items], default=0),
                 "chapters": {i["chapter_id"]: i["max_score"] for i in items},
             }
         )

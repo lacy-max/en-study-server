@@ -36,6 +36,19 @@ export default function Students() {
       render: v => <b>{v}</b>
     },
     {
+      title: '活跃度',
+      dataIndex: 'status',
+      width: 110,
+      render: v =>
+        v === 'active' ? (
+          <Tag color='green'>活跃</Tag>
+        ) : v === 'half' ? (
+          <Tag color='orange'>半活跃</Tag>
+        ) : (
+          <Tag color='default'>不活跃</Tag>
+        )
+    },
+    {
       title: '手机号',
       dataIndex: 'phone',
       width: 150,
