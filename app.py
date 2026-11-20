@@ -689,27 +689,100 @@ def _streak(days: list) -> int:
     return n
 
 
+def _ts_day(ts, default: int = 0):
+    """把秒/毫秒时间戳转成本地日期字符串"""
+    try:
+        v = float(ts or 0)
+    except Exception:
+        return None
+    if v <= 0:
+        return None
+    if v > 1e12:  # 毫秒
+        v = v / 1000.0
+    if v < 1e9:
+        return None
+    try:
+        return datetime.fromtimestamp(v).strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+
+def _heal_checkins(conn, uid: str) -> list:
+    """从学习活跃记录/进度里补回历史打卡（老版本只存在本地，服务端没有）"""
+    days = set(_checkin_days(conn, uid))
+    try:
+        rows = conn.execute(
+            "SELECT at FROM activity WHERE uid=? AND kind='study'", (uid,)
+        ).fetchall()
+        for r in rows:
+            d = _ts_day(r["at"])
+            if d:
+                days.add(d)
+    except Exception:
+        pass
+    try:
+        rows = conn.execute(
+            "SELECT last_study_at FROM progress WHERE uid=?", (uid,)
+        ).fetchall()
+        for r in rows:
+            d = _ts_day(r["last_study_at"])
+            if d:
+                days.add(d)
+    except Exception:
+        pass
+    today = _today_str()
+    days = {d for d in days if d <= today}
+    for d in days:
+        conn.execute(
+            "INSERT OR IGNORE INTO checkins(uid, day, at) VALUES (?,?,?)",
+            (uid, d, int(_now_ts() * 1000)),
+        )
+    conn.commit()
+    return sorted(days)
+
+
 @app.get("/api/checkin")
 def api_checkin_get(x_token: Optional[str] = Header(None)):
     uid = _uid_from_token(x_token)
     conn = _db()
     try:
-        days = _checkin_days(conn, uid)
+        days = _heal_checkins(conn, uid)
     finally:
         conn.close()
     return {"days": days, "streak": _streak(days), "today": _today_str()}
 
 
 @app.post("/api/checkin")
-def api_checkin_post(x_token: Optional[str] = Header(None)):
-    """学完一节（单词或练习）就记一次打卡"""
+async def api_checkin_post(request: Request, x_token: Optional[str] = Header(None)):
+    """学完一节（单词或练习）就记一次打卡；可带 body.days 补录本机历史打卡"""
     uid = _uid_from_token(x_token)
     day = _today_str()
+    backfill = []
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            backfill = [d for d in (body.get("days") or []) if isinstance(d, str)][:400]
+    except Exception:
+        backfill = []
+    today_d = datetime.now().date()
+    valid = []
+    for d in backfill:
+        try:
+            dd = datetime.strptime(d, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        if dd <= today_d:
+            valid.append(d)
     conn = _db()
     try:
         exists = conn.execute(
             "SELECT 1 FROM checkins WHERE uid=? AND day=?", (uid, day)
         ).fetchone()
+        for d in valid:
+            conn.execute(
+                "INSERT OR IGNORE INTO checkins(uid, day, at) VALUES (?,?,?)",
+                (uid, d, int(_now_ts() * 1000)),
+            )
         conn.execute(
             "INSERT OR IGNORE INTO checkins(uid, day, at) VALUES (?,?,?)",
             (uid, day, int(_now_ts() * 1000)),
@@ -719,7 +792,7 @@ def api_checkin_post(x_token: Optional[str] = Header(None)):
             (uid, "study", int(_now_ts() * 1000)),
         )
         conn.commit()
-        days = _checkin_days(conn, uid)
+        days = _heal_checkins(conn, uid)
         return {"ok": True, "isNew": not exists, "days": days, "streak": _streak(days), "today": day}
     finally:
         conn.close()
