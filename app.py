@@ -519,6 +519,43 @@ def api_me(x_token: Optional[str] = Header(None)):
     }
 
 
+@app.get("/api/words")
+def api_words(offset: int = 0, limit: int = 10, x_token: Optional[str] = Header(None)):
+    """学过的单词列表，分页给前端（每次默认 10 条）"""
+    uid = _uid_from_token(x_token)
+    offset = max(0, int(offset or 0))
+    limit = min(50, max(1, int(limit or 10)))
+    prog = _progress_map(uid)
+    items = []
+    for u in _read_units():
+        p = prog.get(u.get("id")) or {}
+        modes = p.get("modes") or {}
+        if not isinstance(modes, dict) or not modes.get("study"):
+            continue
+        title = u.get("title") or ""
+        for w in (u.get("words") or []):
+            if not isinstance(w, dict) or not w.get("en"):
+                continue
+            items.append(
+                {
+                    "en": w.get("en"),
+                    "cn": w.get("cn") or "",
+                    "sentence": w.get("sentence") or "",
+                    "chapterId": u.get("id"),
+                    "chapterTitle": title,
+                }
+            )
+    total = len(items)
+    page = items[offset : offset + limit]
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "items": page,
+        "hasMore": offset + len(page) < total,
+    }
+
+
 @app.get("/api/progress")
 def api_progress_get(x_token: Optional[str] = Header(None)):
     uid = _uid_from_token(x_token)
