@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react'
-import { Table, Button, Tag, message, Popconfirm, Space } from 'antd'
+import { Table, Button, Tag, message, Popconfirm, Space, Input } from 'antd'
 import { fetchFeedback, removeFeedback } from '../api'
 
 
@@ -11,6 +11,7 @@ function fmt(v) {
 export default function Feedback() {
   const [rows, setRows] = useState([])
   const [loading, setLoading] = useState(false)
+  const [q, setQ] = useState('')
 
   const load = async () => {
     setLoading(true)
@@ -27,6 +28,12 @@ export default function Feedback() {
   useEffect(() => {
     load()
   }, [])
+
+  const shownRows = rows.filter(r => {
+    const k = q.trim().toLowerCase()
+    if (!k) return true
+    return [r.text, r.name, r.uid].filter(Boolean).some(x => String(x).toLowerCase().indexOf(k) >= 0)
+  })
 
   const del = async fid => {
     try {
@@ -81,15 +88,27 @@ export default function Feedback() {
     <div>
       <Space style={{ marginBottom: 16 }}>
         <Button onClick={load} loading={loading}>刷新</Button>
-        <span style={{ color: '#8a90a5' }}>共 {rows.length} 条反馈</span>
+        <Input.Search
+          allowClear
+          placeholder='搜反馈内容 / 昵称 / 账号 ID'
+          value={q}
+          onChange={e => setQ(e.target.value)}
+          style={{ width: 300 }}
+        />
+        <span style={{ color: '#8a90a5' }}>共 {shownRows.length} 条反馈</span>
       </Space>
       <Table
         rowKey='id'
         loading={loading}
         columns={columns}
-        dataSource={rows}
+        dataSource={shownRows}
         scroll={{ x: 860 }}
-        pagination={{ pageSize: 10, showSizeChanger: false }}
+        pagination={{
+          pageSize: 10,
+          showSizeChanger: true,
+          pageSizeOptions: ['10', '20', '50'],
+          showTotal: t => `共 ${t} 条反馈`
+        }}
         locale={{ emptyText: '还没有用户反馈' }}
       />
     </div>

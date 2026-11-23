@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from 'react'
-import { Table, Button, Tag, message, Popconfirm, Space } from 'antd'
+import { Table, Button, Tag, message, Popconfirm, Space, Input } from 'antd'
 import { fetchChapters, fetchStudents, removeStudent } from '../api'
 
 export default function Students() {
   const [rows, setRows] = useState([])
   const [units, setUnits] = useState([])
   const [loading, setLoading] = useState(false)
+  const [q, setQ] = useState('')
 
   const load = async () => {
     setLoading(true)
@@ -23,6 +24,12 @@ export default function Students() {
   useEffect(() => {
     load()
   }, [])
+
+  const shownRows = rows.filter(r => {
+    const k = q.trim().toLowerCase()
+    if (!k) return true
+    return [r.name, r.phone, r.uid].filter(Boolean).some(x => String(x).toLowerCase().indexOf(k) >= 0)
+  })
 
   const titleOf = id => {
     const u = units.find(x => x.id === id)
@@ -123,16 +130,31 @@ export default function Students() {
     <div>
       <h3 className='page-title'>学员列表</h3>
       <p className='page-sub'>学员在手机端登录后，资料与进度自动同步到这里</p>
-      <Button onClick={load} loading={loading} style={{ marginBottom: 16 }}>
-        刷新
-      </Button>
+      <Space style={{ marginBottom: 16 }}>
+        <Button onClick={load} loading={loading}>
+          刷新
+        </Button>
+        <Input.Search
+          allowClear
+          placeholder='搜昵称 / 手机号 / 账号 ID'
+          value={q}
+          onChange={e => setQ(e.target.value)}
+          style={{ width: 300 }}
+        />
+        <span style={{ color: '#8a90a5' }}>共 {shownRows.length} 位学员</span>
+      </Space>
       <Table
         rowKey='uid'
-        dataSource={rows}
+        dataSource={shownRows}
         scroll={{ x: 1140 }}
         columns={columns}
         loading={loading}
-        pagination={false}
+        pagination={{
+          pageSize: 10,
+          showSizeChanger: true,
+          pageSizeOptions: ['10', '20', '50'],
+          showTotal: t => `共 ${t} 位学员`
+        }}
         size='middle'
         locale={{ emptyText: '还没有学员注册，让学员在手机端先登录一次' }}
         style={{ background: '#fff', borderRadius: 12, padding: 8 }}

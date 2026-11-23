@@ -10,3 +10,6 @@ admin-app/dist/
 data/app.db
 models/
 .env
+data/chapters.backup-*.json
+data/chunks_preview.txt
+static/audio/
