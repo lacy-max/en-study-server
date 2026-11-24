@@ -315,6 +315,13 @@ def _init_db():
             en TEXT NOT NULL,
             zh TEXT DEFAULT '',
             chapter_id TEXT DEFAULT '',
+            qtype TEXT DEFAULT '',
+            prompt TEXT DEFAULT '',
+            mine TEXT DEFAULT '',
+            answer TEXT DEFAULT '',
+            options TEXT DEFAULT '',
+            done INTEGER DEFAULT 0,
+            reviewed_at INTEGER DEFAULT 0,
             at INTEGER DEFAULT 0,
             PRIMARY KEY (uid, en)
         );
@@ -403,6 +410,18 @@ def _ensure_progress_modes_col(conn):
         if "modes" not in cols:
             conn.execute("ALTER TABLE progress ADD COLUMN modes TEXT DEFAULT '{}'")
             conn.commit()
+    except Exception:
+        pass
+
+
+def _ensure_wrongbook_cols(conn):
+    try:
+        cols = [r["name"] for r in conn.execute("PRAGMA table_info(wrongbook)").fetchall()]
+        if "done" not in cols:
+            conn.execute("ALTER TABLE wrongbook ADD COLUMN done INTEGER DEFAULT 0")
+        if "reviewed_at" not in cols:
+            conn.execute("ALTER TABLE wrongbook ADD COLUMN reviewed_at INTEGER DEFAULT 0")
+        conn.commit()
     except Exception:
         pass
 
@@ -566,8 +585,20 @@ def api_progress_get(x_token: Optional[str] = Header(None)):
         )
     except Exception:
         settings = {}
+    _ensure_wrongbook_cols(conn)
     wrong = [
-        {"en": r["en"], "zh": r["zh"], "chapterId": r["chapter_id"], "at": r["at"]}
+        {
+            "en": r["en"],
+            "zh": r["zh"],
+            "chapterId": r["chapter_id"],
+            "type": r["qtype"] or "",
+            "prompt": r["prompt"] or "",
+            "mine": r["mine"] or "",
+            "answer": r["answer"] or "",
+            "options": (json.loads(r["options"]) if r["options"] else []),
+            "done": bool(r["done"]) if "done" in r.keys() else False,
+            "at": r["at"],
+        }
         for r in conn.execute("SELECT * FROM wrongbook WHERE uid=? ORDER BY at DESC LIMIT 100", (uid,)).fetchall()
     ]
     conn.close()
@@ -667,10 +698,47 @@ async def api_wrong_add(request: Request, x_token: Optional[str] = Header(None))
     if not en:
         raise HTTPException(status_code=400, detail="缺少 en")
     conn = _db()
+    _ensure_wrongbook_cols(conn)
     conn.execute(
-        "INSERT OR REPLACE INTO wrongbook(uid,en,zh,chapter_id,at) VALUES(?,?,?,?,?)",
-        (uid, en, body.get("zh") or "", body.get("chapterId") or "", int(_now_ts() * 1000)),
+        "INSERT OR REPLACE INTO wrongbook(uid,en,zh,chapter_id,qtype,prompt,mine,answer,options,done,reviewed_at,at)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            uid,
+            en,
+            body.get("zh") or "",
+            body.get("chapterId") or "",
+            body.get("type") or "",
+            body.get("prompt") or "",
+            body.get("mine") or "",
+            body.get("answer") or "",
+            json.dumps(body.get("options") or [], ensure_ascii=False) if body.get("options") else "",
+            int(body.get("done") or 0),
+            0,
+            int(_now_ts() * 1000),
+        ),
     )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/wrong/done")
+async def api_wrong_done(request: Request, x_token: Optional[str] = Header(None)):
+    uid = _uid_from_token(x_token)
+    body = await request.json()
+    keys = body.get("keys") or body.get("en") or []
+    if isinstance(keys, str):
+        keys = [keys]
+    conn = _db()
+    _ensure_wrongbook_cols(conn)
+    now = int(_now_ts() * 1000)
+    for k in keys:
+        if not k:
+            continue
+        conn.execute(
+            "UPDATE wrongbook SET done=1, reviewed_at=? WHERE uid=? AND en=?",
+            (now, uid, k),
+        )
     conn.commit()
     conn.close()
     return {"ok": True}
@@ -971,8 +1039,13 @@ def _baidu_asr(wav_path: str) -> str:
     with urllib.request.urlopen(req, timeout=20) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     if data.get("err_no") != 0:
+        code = data.get("err_no")
+        # 3301/3302/3303/3304/3305/3307 之类是「音频没声音、太长、质量差」
+        # 小朋友按早了、说太小声很常见，按「没听清」处理，不让前端报服务错误
+        if code in (3301, 3302, 3303, 3304, 3305, 3307, 3310, 3311):
+            return ""
         raise HTTPException(
-            status_code=503, detail="百度识别失败：%s" % data.get("err_msg", "unknown")
+            status_code=503, detail="百度识别失败(%s)：%s" % (code, data.get("err_msg", "unknown"))
         )
     return "".join(data.get("result") or []).strip()
 
@@ -985,6 +1058,119 @@ def _norm_asr(v) -> str:
 
 def _baidu_ready() -> bool:
     return bool(BAIDU_ASR_KEY and BAIDU_ASR_SECRET)
+
+
+_wav_proc = None
+_wav_lock = threading.Lock()
+
+
+def _wav_start():
+    """常驻转码进程：只启动一次，之后每次转码几十毫秒"""
+    global _wav_proc
+    if _wav_proc and _wav_proc.poll() is None:
+        return _wav_proc
+    try:
+        _wav_proc = subprocess.Popen(
+            [ASR_PYTHON, os.path.join(os.path.dirname(ASR_SCRIPT), "to_wav.py"), "--serve"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+        )
+    except Exception as e:  # noqa: BLE001
+        print("[asr] 转码进程起不来: %s" % e, flush=True)
+        _wav_proc = None
+    return _wav_proc
+
+
+def _to_wav(src: str, dst: str) -> bool:
+    proc = _wav_start()
+    if not proc:
+        return False
+    with _wav_lock:
+        try:
+            proc.stdin.write("%s\t%s\n" % (src, dst))
+            proc.stdin.flush()
+            line = proc.stdout.readline().strip()
+            return line == "ok"
+        except Exception as e:  # noqa: BLE001
+            print("[asr] 转码通信失败: %s" % e, flush=True)
+            global _wav_proc
+            _wav_proc = None
+            return False
+
+
+def _wav_is_silent(path: str) -> bool:
+    """整段几乎是静音就直接判“没听清”，不花百度调用次数"""
+    try:
+        import array
+        import wave
+
+        with wave.open(path, "rb") as w:
+            data = array.array("h")
+            data.frombytes(w.readframes(w.getnframes()))
+        if not data:
+            return True
+        peak = max(abs(v) for v in data)
+        return peak < 1200
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _write_tmp(raw: bytes, suffix: str) -> str:
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmp.write(raw)
+    tmp.close()
+    return tmp.name
+
+
+def _asr_work(raw: bytes, suffix: str, expect) -> tuple:
+    """同步识别（放到线程里跑，避免阻塞事件循环）：返回 (text, engine)"""
+    path = _write_tmp(raw, suffix)
+    engine = "none"
+    text = ""
+    try:
+        if _baidu_ready():
+            wav_path = path + ".wav"
+            ok = _to_wav(path, wav_path)
+            try:
+                if not ok or not os.path.exists(wav_path) or os.path.getsize(wav_path) < 1024:
+                    # 录音太短/格式坏了：当成没听清，不去跑 whisper 白等
+                    print("[asr] 转码失败，按没听清处理", flush=True)
+                    return "", "none"
+                if _wav_is_silent(wav_path):
+                    print("[asr] 整段静音，不调用百度", flush=True)
+                    return "", "none"
+                try:
+                    text = _baidu_asr(wav_path)
+                    engine = "baidu"
+                except HTTPException as e:
+                    print("[asr] 百度失败，改 whisper: %s" % getattr(e, "detail", e), flush=True)
+                    try:
+                        text = _asr_transcribe(path, expect)
+                        engine = "whisper"
+                    except Exception as e2:
+                        print("[asr] whisper 也不可用: %s" % e2, flush=True)
+                        return "", "none"
+            finally:
+                try:
+                    os.unlink(wav_path)
+                except Exception:
+                    pass
+        else:
+            try:
+                text = _asr_transcribe(path, expect)
+                engine = "whisper"
+            except Exception as e:
+                print("[asr] whisper 不可用: %s" % e, flush=True)
+                return "", "none"
+    finally:
+        try:
+            os.unlink(path)
+        except Exception:
+            pass
+    return text, engine
 
 
 @app.post("/api/asr")
@@ -1006,40 +1192,26 @@ async def api_asr(request: Request, expect: Optional[str] = Query(None)):
     }
     suffix = next((v for k, v in suffix_map.items() if k in ctype), ".webm")
     raw = await request.body()
+    # 排查用：留最近 5 条原始录音，方便回听“到底录到了什么”
+    try:
+        dbg = os.path.join(tempfile.gettempdir(), "asr-dbg")
+        os.makedirs(dbg, exist_ok=True)
+        fn = os.path.join(dbg, "%s-%s%s" % (time.strftime("%H%M%S"), (expect or "x")[:12], suffix))
+        with open(fn, "wb") as f:
+            f.write(raw)
+        files = sorted(os.listdir(dbg))
+        for old in files[:-5]:
+            os.unlink(os.path.join(dbg, old))
+        print("[asr] 存档 %s %d bytes" % (fn, len(raw)), flush=True)
+    except Exception as e:  # noqa: BLE001
+        print("[asr] 存档失败: %s" % e, flush=True)
     if not raw:
-        raise HTTPException(status_code=400, detail="缺少录音数据")
+        return {"ok": True, "text": "", "match": None, "score": 0.0, "engine": "none", "reason": "empty"}
     if len(raw) > 10 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="录音太长")
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    tmp.write(raw)
-    tmp.close()
-    engine = "whisper"
-    try:
-        if _baidu_ready():
-            engine = "baidu"
-            # 百度要求 16k / 16bit / 单声道 wav，先转码
-            wav_path = tmp.name + ".wav"
-            conv = subprocess.run(
-                [ASR_PYTHON, os.path.join(os.path.dirname(ASR_SCRIPT), "to_wav.py"), tmp.name, wav_path],
-                capture_output=True,
-                timeout=30,
-            )
-            if conv.returncode != 0:
-                raise HTTPException(status_code=503, detail="录音转码失败")
-            try:
-                text = _baidu_asr(wav_path)
-            finally:
-                try:
-                    os.unlink(wav_path)
-                except Exception:
-                    pass
-        else:
-            text = _asr_transcribe(tmp.name, expect)
-    finally:
-        try:
-            os.unlink(tmp.name)
-        except Exception:
-            pass
+    import asyncio
+
+    text, engine = await asyncio.to_thread(_asr_work, raw, suffix, expect)
 
     # 相似度判定：孩子说得含糊一点也算对
     match = None

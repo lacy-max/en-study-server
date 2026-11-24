@@ -13,3 +13,4 @@ models/
 data/chapters.backup-*.json
 data/chunks_preview.txt
 static/audio/
+data/app.backup-*.db
