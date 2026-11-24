@@ -417,10 +417,18 @@ def _ensure_progress_modes_col(conn):
 def _ensure_wrongbook_cols(conn):
     try:
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(wrongbook)").fetchall()]
-        if "done" not in cols:
-            conn.execute("ALTER TABLE wrongbook ADD COLUMN done INTEGER DEFAULT 0")
-        if "reviewed_at" not in cols:
-            conn.execute("ALTER TABLE wrongbook ADD COLUMN reviewed_at INTEGER DEFAULT 0")
+        want = {
+            "qtype": "TEXT DEFAULT ''",
+            "prompt": "TEXT DEFAULT ''",
+            "mine": "TEXT DEFAULT ''",
+            "answer": "TEXT DEFAULT ''",
+            "options": "TEXT DEFAULT ''",
+            "done": "INTEGER DEFAULT 0",
+            "reviewed_at": "INTEGER DEFAULT 0",
+        }
+        for name, ddl in want.items():
+            if name not in cols:
+                conn.execute(f"ALTER TABLE wrongbook ADD COLUMN {name} {ddl}")
         conn.commit()
     except Exception:
         pass
