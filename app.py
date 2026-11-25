@@ -554,12 +554,17 @@ def api_words(offset: int = 0, limit: int = 10, x_token: Optional[str] = Header(
     offset = max(0, int(offset or 0))
     limit = min(50, max(1, int(limit or 10)))
     prog = _progress_map(uid)
-    items = []
+    # 倒序：最近学的单元排前面（同单元内保持原来的单词顺序）
+    studied = []
     for u in _read_units():
         p = prog.get(u.get("id")) or {}
         modes = p.get("modes") or {}
         if not isinstance(modes, dict) or not modes.get("study"):
             continue
+        studied.append((p.get("lastStudyAt") or 0, str(u.get("id") or ""), u))
+    studied.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    items = []
+    for _ts, _cid, u in studied:
         title = u.get("title") or ""
         for w in (u.get("words") or []):
             if not isinstance(w, dict) or not w.get("en"):
