@@ -32,14 +32,17 @@ def get_model():
 def transcribe(path, language="en", prompt=None):
     """prompt 用来“提示”当前要听的目标词，能显著提升儿童短句的准确率"""
     model = get_model()
-    segments, _info = model.transcribe(
-        path,
+    kw = dict(
         language=language,
         beam_size=3,
-        vad_filter=True,
         condition_on_previous_text=False,
         initial_prompt=prompt or None,
     )
+    try:
+        segments, _info = model.transcribe(path, vad_filter=True, **kw)
+    except Exception:
+        # 没装 onnxruntime 时 silero VAD 不可用：前端已经做过静音截止，直接关掉 VAD
+        segments, _info = model.transcribe(path, vad_filter=False, **kw)
     text = "".join(seg.text for seg in segments).strip()
     return text
 
