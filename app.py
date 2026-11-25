@@ -1134,52 +1134,70 @@ def _write_tmp(raw: bytes, suffix: str) -> str:
     return tmp.name
 
 
+def _whisper_ready() -> bool:
+    return os.path.exists(ASR_PYTHON) and os.path.exists(ASR_SCRIPT)
+
+
+def _sim(text: str, expect) -> float:
+    if not text or not expect:
+        return 0.0
+    import difflib
+
+    a, b = _norm_asr(text), _norm_asr(expect)
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
 def _asr_work(raw: bytes, suffix: str, expect) -> tuple:
-    """同步识别（放到线程里跑，避免阻塞事件循环）：返回 (text, engine)"""
+    """同步识别（放到线程里跑，避免阻塞事件循环）：返回 (text, engine)
+
+    本地 whisper 用目标词当提示，单个英文单词（one / two / red）准确率远高于
+    百度短语音的英文模型；所以 whisper 优先，百度作为兜底与交叉校验，
+    两个都出结果时取与目标词更接近的那个。
+    """
     path = _write_tmp(raw, suffix)
-    engine = "none"
-    text = ""
+    cand = []  # [(text, engine, score)]
     try:
+        if _whisper_ready():
+            try:
+                t = _asr_transcribe(path, expect)
+                if t:
+                    cand.append((t, "whisper", _sim(t, expect)))
+            except Exception as e:  # noqa: BLE001
+                print("[asr] whisper 失败: %s" % e, flush=True)
+
         if _baidu_ready():
             wav_path = path + ".wav"
             ok = _to_wav(path, wav_path)
             try:
                 if not ok or not os.path.exists(wav_path) or os.path.getsize(wav_path) < 1024:
-                    # 录音太短/格式坏了：当成没听清，不去跑 whisper 白等
-                    print("[asr] 转码失败，按没听清处理", flush=True)
-                    return "", "none"
-                if _wav_is_silent(wav_path):
+                    print("[asr] 转码失败，跳过百度", flush=True)
+                elif _wav_is_silent(wav_path):
                     print("[asr] 整段静音，不调用百度", flush=True)
-                    return "", "none"
-                try:
-                    text = _baidu_asr(wav_path)
-                    engine = "baidu"
-                except HTTPException as e:
-                    print("[asr] 百度失败，改 whisper: %s" % getattr(e, "detail", e), flush=True)
+                else:
                     try:
-                        text = _asr_transcribe(path, expect)
-                        engine = "whisper"
-                    except Exception as e2:
-                        print("[asr] whisper 也不可用: %s" % e2, flush=True)
-                        return "", "none"
+                        t = _baidu_asr(wav_path)
+                        if t:
+                            cand.append((t, "baidu", _sim(t, expect)))
+                    except HTTPException as e:
+                        print("[asr] 百度失败: %s" % getattr(e, "detail", e), flush=True)
             finally:
                 try:
                     os.unlink(wav_path)
                 except Exception:
                     pass
-        else:
-            try:
-                text = _asr_transcribe(path, expect)
-                engine = "whisper"
-            except Exception as e:
-                print("[asr] whisper 不可用: %s" % e, flush=True)
-                return "", "none"
     finally:
         try:
             os.unlink(path)
         except Exception:
             pass
-    return text, engine
+
+    if not cand:
+        return "", "none"
+    best = max(cand, key=lambda c: (c[2], c[1] == "whisper"))
+    print("[asr] 候选 %s 选中 %s" % ([("%s:%s:%.2f" % (c[1], c[0], c[2])) for c in cand], best[1]), flush=True)
+    return best[0], best[1]
 
 
 @app.post("/api/asr")
@@ -1239,8 +1257,10 @@ async def api_asr(request: Request, expect: Optional[str] = Query(None)):
 
 @app.get("/api/asr/status")
 def api_asr_status():
-    ready = _baidu_ready() or (os.path.exists(ASR_PYTHON) and os.path.exists(ASR_SCRIPT))
-    return {"ok": True, "enabled": ready, "engine": "baidu" if _baidu_ready() else "whisper"}
+    whisper_ok = _whisper_ready()
+    ready = whisper_ok or _baidu_ready()
+    engine = "whisper+baidu" if (whisper_ok and _baidu_ready()) else ("whisper" if whisper_ok else ("baidu" if _baidu_ready() else "none"))
+    return {"ok": True, "enabled": ready, "engine": engine, "whisper": whisper_ok, "baidu": _baidu_ready()}
 
 
 DOLL_IDS = ["doll%02d" % i for i in range(1, 9)]
