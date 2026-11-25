@@ -12,6 +12,13 @@ import sys
 
 MODEL_SIZE = os.environ.get("ASR_MODEL", "base.en")
 
+try:  # silero VAD 依赖 onnxruntime，没装就关掉 VAD（前端已经做过静音截止）
+    import onnxruntime  # noqa: F401
+
+    HAVE_VAD = True
+except Exception:  # noqa: BLE001
+    HAVE_VAD = False
+
 _model = None
 
 
@@ -38,13 +45,14 @@ def transcribe(path, language="en", prompt=None):
         condition_on_previous_text=False,
         initial_prompt=prompt or None,
     )
-    try:
-        segments, _info = model.transcribe(path, vad_filter=True, **kw)
-    except Exception:
-        # 没装 onnxruntime 时 silero VAD 不可用：前端已经做过静音截止，直接关掉 VAD
-        segments, _info = model.transcribe(path, vad_filter=False, **kw)
-    text = "".join(seg.text for seg in segments).strip()
-    return text
+    for use_vad in ([HAVE_VAD, False] if HAVE_VAD else [False]):
+        try:
+            segments, _info = model.transcribe(path, vad_filter=use_vad, **kw)
+            text = "".join(seg.text for seg in segments).strip()
+            return text
+        except Exception as e:  # noqa: BLE001
+            err = e
+    raise err
 
 
 if __name__ == "__main__":
