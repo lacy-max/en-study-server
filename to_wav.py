@@ -70,11 +70,10 @@ def polish(dst: str, rate: int = 16000) -> None:
 
 
 def denoise(dst: str, rate: int = 16000) -> None:
-    """去底噪 + 去低频嗡声：给识别引擎一段干净的语音
+    """去底噪：一阶高通去低频嗡声 + 幅度谱减法（谱减法是给 ASR 提准确率最稳的一档）
 
-    做法很轻量：一阶高通滤掉 80Hz 以下的空调/电机噪声，再按 20ms 分帧做
-    软噪声门——比整体 RMS 明显小的帧按比例压低，句间杂音基本消失，
-    但保留气音和尾音，不会把轻声的辅音一起吃掉。
+    步骤：25ms 帧 / 10ms 移，汉宁窗；用能量最低的 20% 帧估噪声谱；
+    每个频点按噪声幅度做软减（保留 25% 残量，避免"水声"和吞辅音）。
     """
     try:
         import array
@@ -90,40 +89,54 @@ def denoise(dst: str, rate: int = 16000) -> None:
         if not data:
             return
         x = np.asarray(data, dtype=np.float32)
-        # 一阶高通（去 DC 与低频嗡嗡声）
+        # 1) 高通 80Hz
         rc = 1.0 / (2 * np.pi * 80.0)
         dt = 1.0 / rate
         alpha = rc / (rc + dt)
         y = np.empty_like(x)
-        prev_x = 0.0
-        prev_y = 0.0
-        for i in range(len(x)):  # 16k 点级循环，最长 5 秒，开销可接受
+        px = 0.0
+        py = 0.0
+        for i in range(len(x)):
             cur = x[i]
-            prev_y = alpha * (prev_y + cur - prev_x)
-            prev_x = cur
-            y[i] = prev_y
-        # 分帧软噪声门
-        hop = int(rate * 0.02)
-        n = len(y) // hop
-        if n > 4:
-            frames = y[: n * hop].reshape(n, hop)
-            rms = np.sqrt(np.mean(frames ** 2, axis=1) + 1e-9)
-            # 取最小的 20% 帧作为底噪估计
-            floor = float(np.percentile(rms, 20))
-            peak_level = float(np.percentile(rms, 90))
-            # 底噪估计接近语音本身（短词/整段都在说话）时不要开噪声门，否则会把语音一起压掉
-            if floor < peak_level * 0.45:
-                gate = max(floor * 2.5, peak_level * 0.08, 30.0)
-                for i in range(n):
-                    if rms[i] < gate:
-                        frames[i] *= 0.25
-                y[: n * hop] = frames.reshape(-1)
-        out = np.clip(y, -32768, 32767).astype(np.int16)
+            py = alpha * (py + cur - px)
+            px = cur
+            y[i] = py
+
+        # 2) 谱减法
+        n_fft = 512
+        hop = 256
+        if len(y) >= n_fft:
+            win = np.hanning(n_fft).astype(np.float32)
+            frames = []
+            for i in range(0, len(y) - n_fft + 1, hop):
+                frames.append(y[i : i + n_fft])
+            if len(frames) > 3:
+                spec = np.fft.rfft(np.array(frames) * win, axis=1)
+                mag = np.abs(spec)
+                energy = mag.sum(axis=1)
+                quiet = np.argsort(energy)[: max(1, int(len(energy) * 0.2))]
+                noise = np.median(mag[quiet], axis=0)
+                clean_mag = np.maximum(mag - noise * 1.2, mag * 0.25)
+                cleaned = np.fft.irfft(clean_mag * np.exp(1j * np.angle(spec)), axis=1) * win
+                # 重叠相加
+                out = np.zeros(len(y), dtype=np.float32)
+                for idx, fr in enumerate(cleaned):
+                    i = idx * hop
+                    out[i : i + n_fft] += fr
+                # 补偿窗的重叠能量
+                wsum = np.zeros(len(y), dtype=np.float32)
+                for idx in range(len(cleaned)):
+                    i = idx * hop
+                    wsum[i : i + n_fft] += win ** 2
+                wsum[wsum < 1e-6] = 1.0
+                y = out / wsum
+            y = np.clip(y, -32768, 32767)
+        out_i = np.clip(y, -32768, 32767).astype(np.int16)
         with wave.open(dst, "wb") as w:
             w.setnchannels(1)
             w.setsampwidth(2)
             w.setframerate(rate)
-            w.writeframes(out.tobytes())
+            w.writeframes(out_i.tobytes())
     except Exception as e:  # noqa: BLE001
         print("denoise skip: %s" % e, flush=True)
 
