@@ -1209,7 +1209,7 @@ def _asr_work(raw: bytes, suffix: str, expect) -> tuple:
             print("[asr] 转码失败，按没听清处理", flush=True)
             return "", "none", 0.0
         dur = _wav_duration(wav)
-        if dur < 0.55:
+        if dur < 0.30:
             print("[asr] 录音太短(%.2fs)，按没听清处理" % dur, flush=True)
             return "", "none", dur
         if _wav_is_silent(wav):

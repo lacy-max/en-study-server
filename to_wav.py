@@ -52,7 +52,7 @@ def polish(dst: str, rate: int = 16000) -> None:
         j -= 1
     if j - i < rate * 0.2:  # 几乎全是静音，原样返回
         return
-    pad = int(rate * 0.15)
+    pad = int(rate * 0.25)
     start = max(0, i - pad)
     end = min(len(data), j + pad)
     seg = data[start:end]
