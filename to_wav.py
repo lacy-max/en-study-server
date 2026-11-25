@@ -111,11 +111,13 @@ def denoise(dst: str, rate: int = 16000) -> None:
             # 取最小的 20% 帧作为底噪估计
             floor = float(np.percentile(rms, 20))
             peak_level = float(np.percentile(rms, 90))
-            gate = max(floor * 2.5, peak_level * 0.08, 30.0)
-            for i in range(n):
-                if rms[i] < gate:
-                    frames[i] *= 0.25
-            y[: n * hop] = frames.reshape(-1)
+            # 底噪估计接近语音本身（短词/整段都在说话）时不要开噪声门，否则会把语音一起压掉
+            if floor < peak_level * 0.45:
+                gate = max(floor * 2.5, peak_level * 0.08, 30.0)
+                for i in range(n):
+                    if rms[i] < gate:
+                        frames[i] *= 0.25
+                y[: n * hop] = frames.reshape(-1)
         out = np.clip(y, -32768, 32767).astype(np.int16)
         with wave.open(dst, "wb") as w:
             w.setnchannels(1)
