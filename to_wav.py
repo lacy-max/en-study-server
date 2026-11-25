@@ -69,6 +69,63 @@ def polish(dst: str, rate: int = 16000) -> None:
         w.writeframes(seg.tobytes())
 
 
+def denoise(dst: str, rate: int = 16000) -> None:
+    """去底噪 + 去低频嗡声：给识别引擎一段干净的语音
+
+    做法很轻量：一阶高通滤掉 80Hz 以下的空调/电机噪声，再按 20ms 分帧做
+    软噪声门——比整体 RMS 明显小的帧按比例压低，句间杂音基本消失，
+    但保留气音和尾音，不会把轻声的辅音一起吃掉。
+    """
+    try:
+        import array
+        import wave
+
+        import numpy as np
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        with wave.open(dst, "rb") as w:
+            data = array.array("h")
+            data.frombytes(w.readframes(w.getnframes()))
+        if not data:
+            return
+        x = np.asarray(data, dtype=np.float32)
+        # 一阶高通（去 DC 与低频嗡嗡声）
+        rc = 1.0 / (2 * np.pi * 80.0)
+        dt = 1.0 / rate
+        alpha = rc / (rc + dt)
+        y = np.empty_like(x)
+        prev_x = 0.0
+        prev_y = 0.0
+        for i in range(len(x)):  # 16k 点级循环，最长 5 秒，开销可接受
+            cur = x[i]
+            prev_y = alpha * (prev_y + cur - prev_x)
+            prev_x = cur
+            y[i] = prev_y
+        # 分帧软噪声门
+        hop = int(rate * 0.02)
+        n = len(y) // hop
+        if n > 4:
+            frames = y[: n * hop].reshape(n, hop)
+            rms = np.sqrt(np.mean(frames ** 2, axis=1) + 1e-9)
+            # 取最小的 20% 帧作为底噪估计
+            floor = float(np.percentile(rms, 20))
+            peak_level = float(np.percentile(rms, 90))
+            gate = max(floor * 2.5, peak_level * 0.08, 30.0)
+            for i in range(n):
+                if rms[i] < gate:
+                    frames[i] *= 0.25
+            y[: n * hop] = frames.reshape(-1)
+        out = np.clip(y, -32768, 32767).astype(np.int16)
+        with wave.open(dst, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(out.tobytes())
+    except Exception as e:  # noqa: BLE001
+        print("denoise skip: %s" % e, flush=True)
+
+
 def serve() -> None:
     """常驻模式：避免每次转码都付 5 秒的 python 启动+导入成本。
     读 stdin 每行 "src\tdst"，转好回 "ok"，失败回 "err:..."。
@@ -85,6 +142,7 @@ def serve() -> None:
         try:
             convert(src, dst)
             polish(dst)
+            denoise(dst)
             print("ok", flush=True)
         except Exception as e:  # noqa: BLE001
             print("err:%s" % e, flush=True)
