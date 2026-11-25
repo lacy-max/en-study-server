@@ -982,7 +982,10 @@ def _asr_start():
 
 
 def _asr_transcribe(path: str, prompt: Optional[str] = None) -> str:
-    with _asr_lock:
+    # 模型加载/上一次识别还在跑时，最多等 3 秒就放弃走百度，避免整条请求被拖住
+    if not _asr_lock.acquire(timeout=3):
+        raise HTTPException(status_code=503, detail="whisper 忙")
+    try:
         proc = _asr_start()
         payload = json.dumps({"path": path, "prompt": prompt or None}, ensure_ascii=False)
         proc.stdin.write(payload + "\n")
@@ -994,6 +997,8 @@ def _asr_transcribe(path: str, prompt: Optional[str] = None) -> str:
         if not data.get("ok"):
             raise HTTPException(status_code=503, detail="语音识别失败")
         return data.get("text", "")
+    finally:
+        _asr_lock.release()
 
 
 # ---------------- 百度智能云短语音识别（英文，dev_pid=1737） ----------------
