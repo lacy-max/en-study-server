@@ -50,6 +50,15 @@ def transcribe(path, language="en", prompt=None):
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--serve":
         # 常驻模式：每行一个音频路径，输出一行 JSON（模型只加载一次）
+        try:  # 预热：先把模型读进内存，避免第一次识别卡几十秒
+            sys.stderr.write("loading model...\n")
+            sys.stderr.flush()
+            get_model()
+            sys.stderr.write("model ready\n")
+            sys.stderr.flush()
+        except Exception as _e:  # noqa: BLE001
+            sys.stderr.write("preload failed: %s\n" % _e)
+            sys.stderr.flush()
         for line in sys.stdin:
             raw = line.strip()
             if not raw:

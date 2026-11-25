@@ -1260,6 +1260,27 @@ async def api_asr(request: Request, expect: Optional[str] = Query(None)):
     return {"ok": True, "text": text, "match": match, "score": round(score, 2), "engine": engine}
 
 
+_warm_once = {"done": False}
+
+
+@app.on_event("startup")
+def _warm_asr_on_start():
+    """服务一启动就在后台把 whisper 模型读进来，第一次识别不用干等"""
+    global _warm_once
+    if _warm_once["done"]:
+        return
+    _warm_once["done"] = True
+
+    def _run():
+        try:
+            _asr_start()
+            print("[asr] whisper 预热进程已拉起", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print("[asr] whisper 预热失败: %s" % e, flush=True)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 @app.get("/api/asr/status")
 def api_asr_status():
     whisper_ok = _whisper_ready()
