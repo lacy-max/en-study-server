@@ -1154,55 +1154,79 @@ def _sim(text: str, expect) -> float:
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 
-def _asr_work(raw: bytes, suffix: str, expect) -> tuple:
-    """同步识别（放到线程里跑，避免阻塞事件循环）：返回 (text, engine)
+def _wav_duration(path: str) -> float:
+    try:
+        import wave
 
-    本地 whisper 用目标词当提示，单个英文单词（one / two / red）准确率远高于
-    百度短语音的英文模型；所以 whisper 优先，百度作为兜底与交叉校验，
-    两个都出结果时取与目标词更接近的那个。
+        with wave.open(path, "rb") as w:
+            return w.getnframes() / float(w.getframerate() or 16000)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _asr_candidates(wav_path: str, expect) -> list:
+    """whisper 与百度并行跑，互不拖慢：返回 [(text, engine, score)]"""
+    out = []
+
+    def _whisper():
+        try:
+            t = _asr_transcribe(wav_path, expect)
+            if t:
+                out.append((t, "whisper", _sim(t, expect)))
+        except Exception as e:  # noqa: BLE001
+            print("[asr] whisper 失败: %s" % e, flush=True)
+
+    def _baidu():
+        try:
+            if _baidu_ready():
+                t = _baidu_asr(wav_path)
+                if t:
+                    out.append((t, "baidu", _sim(t, expect)))
+        except Exception as e:  # noqa: BLE001
+            print("[asr] 百度失败: %s" % getattr(e, "detail", e), flush=True)
+
+    threads = []
+    for fn in (_whisper, _baidu):
+        th = threading.Thread(target=fn, daemon=True)
+        th.start()
+        threads.append(th)
+    for th in threads:
+        th.join(timeout=60)
+    return out
+
+
+def _asr_work(raw: bytes, suffix: str, expect) -> tuple:
+    """同步识别（放到线程里跑，避免阻塞事件循环）：返回 (text, engine, dur)
+
+    先把录音统一转成 16k 单声道 wav 并做轻量降噪/增益，然后 whisper 与百度
+    并行识别（whisper 带目标词提示，单个英文单词最准），取与目标词更接近的候选。
+    录音过短（<0.55s，基本是没张开嘴就停了）直接判没听清，不浪费识别时间。
     """
     path = _write_tmp(raw, suffix)
-    cand = []  # [(text, engine, score)]
     try:
-        if _whisper_ready():
-            try:
-                t = _asr_transcribe(path, expect)
-                if t:
-                    cand.append((t, "whisper", _sim(t, expect)))
-            except Exception as e:  # noqa: BLE001
-                print("[asr] whisper 失败: %s" % e, flush=True)
-
-        if _baidu_ready():
-            wav_path = path + ".wav"
-            ok = _to_wav(path, wav_path)
-            try:
-                if not ok or not os.path.exists(wav_path) or os.path.getsize(wav_path) < 1024:
-                    print("[asr] 转码失败，跳过百度", flush=True)
-                elif _wav_is_silent(wav_path):
-                    print("[asr] 整段静音，不调用百度", flush=True)
-                else:
-                    try:
-                        t = _baidu_asr(wav_path)
-                        if t:
-                            cand.append((t, "baidu", _sim(t, expect)))
-                    except HTTPException as e:
-                        print("[asr] 百度失败: %s" % getattr(e, "detail", e), flush=True)
-            finally:
-                try:
-                    os.unlink(wav_path)
-                except Exception:
-                    pass
+        wav = path + ".wav"
+        if not _to_wav(path, wav) or not os.path.exists(wav) or os.path.getsize(wav) < 800:
+            print("[asr] 转码失败，按没听清处理", flush=True)
+            return "", "none", 0.0
+        dur = _wav_duration(wav)
+        if dur < 0.55:
+            print("[asr] 录音太短(%.2fs)，按没听清处理" % dur, flush=True)
+            return "", "none", dur
+        if _wav_is_silent(wav):
+            print("[asr] 整段静音，按没听清处理", flush=True)
+            return "", "none", dur
+        cand = _asr_candidates(wav, expect)
+        if not cand:
+            return "", "none", dur
+        best = max(cand, key=lambda c: (c[2], c[1] == "whisper"))
+        print("[asr] 候选 %s 选中 %s (%.2fs)" % ([("%s:%s:%.2f" % c) for c in cand], best[1], dur), flush=True)
+        return best[0], best[1], dur
     finally:
-        try:
-            os.unlink(path)
-        except Exception:
-            pass
-
-    if not cand:
-        return "", "none"
-    best = max(cand, key=lambda c: (c[2], c[1] == "whisper"))
-    print("[asr] 候选 %s 选中 %s" % ([("%s:%s:%.2f" % (c[1], c[0], c[2])) for c in cand], best[1]), flush=True)
-    return best[0], best[1]
+        for f in (path, path + ".wav"):
+            try:
+                os.unlink(f)
+            except Exception:
+                pass
 
 
 @app.post("/api/asr")
@@ -1243,7 +1267,7 @@ async def api_asr(request: Request, expect: Optional[str] = Query(None)):
         raise HTTPException(status_code=413, detail="录音太长")
     import asyncio
 
-    text, engine = await asyncio.to_thread(_asr_work, raw, suffix, expect)
+    text, engine, dur = await asyncio.to_thread(_asr_work, raw, suffix, expect)
 
     # 相似度判定：孩子说得含糊一点也算对
     match = None
@@ -1257,7 +1281,7 @@ async def api_asr(request: Request, expect: Optional[str] = Query(None)):
             if b in a or score >= 0.75:
                 match = expect
                 score = max(score, 0.9)
-    return {"ok": True, "text": text, "match": match, "score": round(score, 2), "engine": engine}
+    return {"ok": True, "text": text, "match": match, "score": round(score, 2), "engine": engine, "dur": round(dur, 2)}
 
 
 _warm_once = {"done": False}

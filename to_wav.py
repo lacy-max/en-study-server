@@ -57,8 +57,8 @@ def polish(dst: str, rate: int = 16000) -> None:
     end = min(len(data), j + pad)
     seg = data[start:end]
     seg_peak = max(abs(v) for v in seg) or 1
-    if seg_peak < 6000:  # 偏小声就放大
-        gain = min(6.0, 8000 / seg_peak)
+    if seg_peak < 4500:  # 偏小声才放大，且最多 2 倍，避免削波失真反而识别不准
+        gain = min(2.0, 5000 / seg_peak)
         for k in range(len(seg)):
             v = int(seg[k] * gain)
             seg[k] = 32767 if v > 32767 else (-32768 if v < -32768 else v)
