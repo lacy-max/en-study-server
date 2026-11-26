@@ -105,6 +105,23 @@ function pick(row, keys) {
   return ''
 }
 
+// 词块写法：Look at=看看|me=我
+function parseChunkText(man) {
+  if (!man) return null
+  const chunks = String(man)
+    .split(/[|｜]/)
+    .map(x => x.trim())
+    .filter(Boolean)
+    .map(pair => {
+      const i = pair.search(/[=:：]/)
+      return i < 0
+        ? { en: pair.trim(), cn: '' }
+        : { en: pair.slice(0, i).trim(), cn: pair.slice(i + 1).trim() }
+    })
+    .filter(c => c.en)
+  return chunks.length ? chunks : null
+}
+
 function rowsToUnits(rows) {
   const map = new Map()
   const order = []
@@ -143,46 +160,28 @@ function rowsToUnits(rows) {
       emoji: pick(row, COLS.emoji),
       sentences: []
     }
-    // 例句：支持「例句1英文/例句1中文」…「例句5英文/例句5中文」，也兼容单列「例句英文」
+    // 例句：支持「例句1英文/例句1中文」…「例句5英文/例句5中文」，每句可选配「例句N词块」
     const sentPairs = []
     for (let k = 1; k <= 5; k++) {
       const seK = pick(row, [`例句${k}英文`, `例句${k}`, `例句${k}句子`]) || (k === 1 ? pick(row, COLS.sentence) : '')
       const cnK = pick(row, [`例句${k}中文`, `例句${k}释义`]) || (k === 1 ? pick(row, COLS.sentenceCn) : '')
-      if (seK) sentPairs.push({ se: seK, cn: cnK })
+      const chK = pick(row, [`例句${k}词块`]) || (k === 1 ? pick(row, COLS.chunks) : '')
+      if (seK || chK) sentPairs.push({ se: seK, cn: cnK, ch: chK })
     }
-    const manual = pick(row, COLS.chunks)
-    let se = sentPairs.length ? sentPairs[0].se : ''
-    let cn = sentPairs.length ? sentPairs[0].cn : ''
-    if (!se && manual) {
-      // 只填了词块也能成句
-      se = manual
-        .split(/[|｜]/)
-        .map(x => x.split(/[=:：]/)[0].trim())
-        .filter(Boolean)
-        .join(' ')
-    }
-    if (se) {
-      let chunks = null
-      if (manual) {
-        // 例句词块写法：I=我|like=喜欢|apples=苹果
-        chunks = manual
-          .split(/[|｜]/)
-          .map(x => x.trim())
-          .filter(Boolean)
-          .map(pair => {
-            const i = pair.search(/[=:：]/)
-            return i < 0
-              ? { en: pair.trim(), cn: '' }
-              : { en: pair.slice(0, i).trim(), cn: pair.slice(i + 1).trim() }
-          })
-          .filter(c => c.en)
-      }
-      if (!chunks || !chunks.length) {
-        // 自动按空格切成词块；中文用 | 对齐，数量对上才能一一挂上
+    const parseChunks = parseChunkText
+    for (const p of sentPairs) {
+      let se = p.se
+      const manualChunks = parseChunks(p.ch)
+      if (!se && manualChunks) se = manualChunks.map(c => c.en).join(' ')
+      if (!se) continue
+      let cn = p.cn
+      let chunks = manualChunks
+      if (!chunks) {
+        // 没写词块时自动按空格切；中文用 | 按同样段数对齐
         const tokens = se.split(/\s+/).filter(Boolean)
-        let cns = cn ? cn.split(/[|｜]/).map(x => x.trim()).filter(x => x) : []
+        let cns = cn ? cn.split(/[|｜]/).map(x => x.trim()).filter(Boolean) : []
         if (cns.length !== tokens.length && cn && /\s/.test(cn)) {
-          const bySpace = cn.split(/\s+/).map(x => x.trim()).filter(x => x)
+          const bySpace = cn.split(/\s+/).map(x => x.trim()).filter(Boolean)
           if (bySpace.length === tokens.length) cns = bySpace
         }
         if (cns.length === tokens.length) {
@@ -191,25 +190,12 @@ function rowsToUnits(rows) {
           chunks = tokens.map(t => ({ en: t, cn: '' }))
           if (cns.length === 1) chunks[0].cn = cns[0]
           if (cns.length > 1) {
-            warns.push(`「${en}」例句英文 ${tokens.length} 个词，例句中文 ${cns.length} 段，没对上，中文先留空`)
+            warns.push(`「${en}」例句「${se}」英文 ${tokens.length} 个词、中文 ${cns.length} 段，没对上，中文先留空`)
           }
         }
       }
-      w.sentences.push({ en: se, cn: (sentPairs[0] && sentPairs[0].cn ? sentPairs[0].cn.split(/[|｜]/).map(x=>x.trim()).filter(x=>x).join('') : ''), chunks })
-    }
-    // 第 2 条及以后的例句
-    for (const p of sentPairs.slice(1)) {
-      const toks2 = p.se.split(/\s+/).filter(Boolean)
-      let cns2 = p.cn ? p.cn.split(/[|｜]/).map(x => x.trim()).filter(x => x) : []
-      if (cns2.length !== toks2.length && p.cn && /\s/.test(p.cn)) {
-        const bySpace2 = p.cn.split(/\s+/).map(x => x.trim()).filter(x => x)
-        if (bySpace2.length === toks2.length) cns2 = bySpace2
-      }
-      if (cns2.length !== toks2.length) {
-        warns.push(`「${en}」例句「${p.se}」英文 ${toks2.length} 词、中文 ${cns2.length} 段，没对上，已跳过`)
-        continue
-      }
-      w.sentences.push({ en: p.se, cn: cns2.join(''), chunks: toks2.map((t, i) => ({ en: t, cn: cns2[i] })) })
+      const cnAll = chunks.map(c => c.cn).join('') || (cn ? cn.split(/[|｜]/).map(x => x.trim()).filter(Boolean).join('') : '')
+      w.sentences.push({ en: se, cn: cnAll, chunks })
     }
     if (w.sentences.length) {
       w.sentence = w.sentences[0].en
@@ -243,7 +229,8 @@ function readSheet(file) {
             if (!id || !se) continue
             const who = pick(r, ['说话人', '角色', 'who', '人']) || 'A'
             const no = Number(pick(r, ['轮次', '序号', 'no'])) || 0
-            ;(lines[id] = lines[id] || []).push({ who, se, cn, no })
+            const ch = pick(r, ['词块', '例句词块', 'chunks'])
+            ;(lines[id] = lines[id] || []).push({ who, se, cn, ch, no })
           }
           for (const id of Object.keys(lines)) {
             const u = res.units.find(x => x.id === id)
@@ -254,6 +241,11 @@ function readSheet(file) {
             const sorted = lines[id].sort((a, b) => a.no - b.no)
             u.sentences = u.sentences || []
             for (const L of sorted) {
+              const manChunks = parseChunkText(L.ch)
+              if (manChunks) {
+                u.sentences.push({ who: L.who, en: manChunks.map(c => c.en).join(' '), cn: manChunks.map(c => c.cn).join(''), chunks: manChunks })
+                continue
+              }
               const toks = L.se.split(/\s+/).filter(Boolean)
               let cns = L.cn ? L.cn.split(/[|｜]/).map(x => x.trim()).filter(x => x) : []
               if (cns.length !== toks.length && L.cn && /\s/.test(L.cn)) {
