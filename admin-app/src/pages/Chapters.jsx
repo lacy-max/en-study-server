@@ -143,9 +143,16 @@ function rowsToUnits(rows) {
       emoji: pick(row, COLS.emoji),
       sentences: []
     }
-    const cn = pick(row, COLS.sentenceCn)
+    // 例句：支持「例句1英文/例句1中文」…「例句5英文/例句5中文」，也兼容单列「例句英文」
+    const sentPairs = []
+    for (let k = 1; k <= 5; k++) {
+      const seK = pick(row, [`例句${k}英文`, `例句${k}`, `例句${k}句子`]) || (k === 1 ? pick(row, COLS.sentence) : '')
+      const cnK = pick(row, [`例句${k}中文`, `例句${k}释义`]) || (k === 1 ? pick(row, COLS.sentenceCn) : '')
+      if (seK) sentPairs.push({ se: seK, cn: cnK })
+    }
     const manual = pick(row, COLS.chunks)
-    let se = pick(row, COLS.sentence)
+    let se = sentPairs.length ? sentPairs[0].se : ''
+    let cn = sentPairs.length ? sentPairs[0].cn : ''
     if (!se && manual) {
       // 只填了词块也能成句
       se = manual
@@ -188,7 +195,26 @@ function rowsToUnits(rows) {
           }
         }
       }
-      w.sentences.push({ chunks })
+      w.sentences.push({ en: se, cn: (sentPairs[0] && sentPairs[0].cn ? sentPairs[0].cn.split(/[|｜]/).map(x=>x.trim()).filter(x=>x).join('') : ''), chunks })
+    }
+    // 第 2 条及以后的例句
+    for (const p of sentPairs.slice(1)) {
+      const toks2 = p.se.split(/\s+/).filter(Boolean)
+      let cns2 = p.cn ? p.cn.split(/[|｜]/).map(x => x.trim()).filter(x => x) : []
+      if (cns2.length !== toks2.length && p.cn && /\s/.test(p.cn)) {
+        const bySpace2 = p.cn.split(/\s+/).map(x => x.trim()).filter(x => x)
+        if (bySpace2.length === toks2.length) cns2 = bySpace2
+      }
+      if (cns2.length !== toks2.length) {
+        warns.push(`「${en}」例句「${p.se}」英文 ${toks2.length} 词、中文 ${cns2.length} 段，没对上，已跳过`)
+        continue
+      }
+      w.sentences.push({ en: p.se, cn: cns2.join(''), chunks: toks2.map((t, i) => ({ en: t, cn: cns2[i] })) })
+    }
+    if (w.sentences.length) {
+      w.sentence = w.sentences[0].en
+      w.sentenceCn = w.sentences[0].cn
+      w.chunks = w.sentences[0].chunks
     }
     words.push(w)
   }
@@ -202,9 +228,47 @@ function readSheet(file) {
     fr.onload = () => {
       try {
         const wb = XLSX.read(new Uint8Array(fr.result), { type: 'array' })
-        const sheet = wb.Sheets[wb.SheetNames[0]]
-        const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' })
-        resolve(rowsToUnits(rows))
+        const names = wb.SheetNames || []
+        const dlgName = names.find(n => /对话|dialog/i.test(n))
+        const wordName = names.find(n => n !== dlgName) || names[0]
+        const rows = XLSX.utils.sheet_to_json(wb.Sheets[wordName], { defval: '' })
+        const res = rowsToUnits(rows)
+        if (dlgName) {
+          const dlgRows = XLSX.utils.sheet_to_json(wb.Sheets[dlgName], { defval: '' })
+          const lines = {}
+          for (const r of dlgRows) {
+            const id = pick(r, COLS.id)
+            const se = pick(r, ['英文', '英文句子', 'en', '句子'])
+            const cn = pick(r, ['中文', '中文句子', 'cn'])
+            if (!id || !se) continue
+            const who = pick(r, ['说话人', '角色', 'who', '人']) || 'A'
+            const no = Number(pick(r, ['轮次', '序号', 'no'])) || 0
+            ;(lines[id] = lines[id] || []).push({ who, se, cn, no })
+          }
+          for (const id of Object.keys(lines)) {
+            const u = res.units.find(x => x.id === id)
+            if (!u) {
+              res.warns.push(`对话 sheet 里的「${id}」没在单词表里找到，已跳过`)
+              continue
+            }
+            const sorted = lines[id].sort((a, b) => a.no - b.no)
+            u.sentences = u.sentences || []
+            for (const L of sorted) {
+              const toks = L.se.split(/\s+/).filter(Boolean)
+              let cns = L.cn ? L.cn.split(/[|｜]/).map(x => x.trim()).filter(x => x) : []
+              if (cns.length !== toks.length && L.cn && /\s/.test(L.cn)) {
+                const bySpace = L.cn.split(/\s+/).map(x => x.trim()).filter(x => x)
+                if (bySpace.length === toks.length) cns = bySpace
+              }
+              if (cns.length !== toks.length) {
+                res.warns.push(`对话「${L.se}」英文 ${toks.length} 词、中文 ${cns.length} 段，没对上，已跳过`)
+                continue
+              }
+              u.sentences.push({ who: L.who, en: L.se, cn: cns.join(''), chunks: toks.map((t, i) => ({ en: t, cn: cns[i] })) })
+            }
+          }
+        }
+        resolve(res)
       } catch (e) {
         reject(e)
       }
@@ -216,37 +280,51 @@ function readSheet(file) {
 
 const TEMPLATE_ROWS = [
   {
-    单元ID: 'unit05',
-    单元标题: 'Unit 05 · 水果',
-    副标题: '第1天 · 新词学习',
+    单元ID: 'unit65',
+    单元标题: 'Unit 65 · 水果',
+    副标题: 'L0 启蒙 · 10 个词 · 3 岁起',
     级别: 'L0',
     英文单词: 'apple',
     中文释义: '苹果',
     英音: '/ˈæpl/',
     美音: '/ˈæpl/',
     emoji: '🍎',
-    例句英文: 'I like apples.',
-    例句中文: '我|喜欢|苹果。'
+    例句1英文: 'One apple.',
+    例句1中文: '一个|苹果。',
+    例句2英文: 'Red apple.',
+    例句2中文: '红红的|苹果。',
+    例句3英文: 'Eat an apple.',
+    例句3中文: '吃|一个|苹果。'
   },
   {
-    单元ID: 'unit05',
-    单元标题: 'Unit 05 · 水果',
-    副标题: '第1天 · 新词学习',
+    单元ID: 'unit65',
+    单元标题: 'Unit 65 · 水果',
+    副标题: 'L0 启蒙 · 10 个词 · 3 岁起',
     级别: 'L0',
     英文单词: 'banana',
     中文释义: '香蕉',
     英音: '/bəˈnɑːnə/',
     美音: '/bəˈnænə/',
     emoji: '🍌',
-    例句英文: 'The banana is yellow.',
-    例句中文: '香蕉|是|黄色的。'
+    例句1英文: 'Yellow banana.',
+    例句1中文: '黄色的|香蕉。',
+    例句2英文: 'Peel the banana.',
+    例句2中文: '剥|香蕉。',
+    例句3英文: 'Eat a banana.',
+    例句3中文: '吃|一根|香蕉。'
   }
+]
+
+const TEMPLATE_DIALOG = [
+  { 单元ID: 'unit65', 轮次: 1, 说话人: 'A', 英文: 'One apple, please.', 中文: '一个|苹果|请。' },
+  { 单元ID: 'unit65', 轮次: 2, 说话人: 'B', 英文: 'Here you are.', 中文: '给|你。' }
 ]
 
 function downloadTemplate() {
   const ws = XLSX.utils.json_to_sheet(TEMPLATE_ROWS)
   const wb = XLSX.utils.book_new()
   XLSX.utils.book_append_sheet(wb, ws, '题库')
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(TEMPLATE_DIALOG), '对话')
   XLSX.writeFile(wb, '英语题库导入模板.xlsx')
 }
 
@@ -934,7 +1012,7 @@ export default function Chapters() {
           <Alert
             type='info'
             showIcon
-            message='Excel/CSV 表头：单元ID、单元标题、副标题、级别、英文单词、中文释义、英音、美音、emoji、例句英文、例句中文、例句词块。一行一个单词；例句英文会按空格自动切成词块，例句中文用竖线按同样段数对齐，如：I like apples. / 我|喜欢|苹果。'
+            message='Excel 表头：单元ID、单元标题、副标题、级别、英文单词、中文释义、英音、美音、emoji、例句1英文、例句1中文、例句2英文、例句2中文、例句3英文、例句3中文（最多到例句5）。一行一个单词；例句按空格切成词块，中文用竖线按同样段数对齐，如：I like apples. / 我|喜欢|苹果。还可以加一个「对话」sheet：单元ID、轮次、说话人、英文、中文。'
           />
           <Space>
             <Button size='small' onClick={downloadTemplate}>下载 Excel 模板</Button>
