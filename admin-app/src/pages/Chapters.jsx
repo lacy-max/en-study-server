@@ -9,13 +9,20 @@ import {
   Tag,
   Popconfirm,
   Select,
-  Empty
+  Empty,
+  Modal,
+  Radio,
+  Upload,
+  Alert
 } from 'antd'
+import { InboxOutlined } from '@ant-design/icons'
+import * as XLSX from 'xlsx'
 import {
   fetchChapters,
   saveChapter,
   removeChapter,
-  reorderChapters
+  reorderChapters,
+  importChapters
 } from '../api'
 
 const { TextArea } = Input
@@ -73,6 +80,176 @@ function normalizeWord(w) {
   }
 }
 
+/* ---------- Excel / CSV → 单元结构 ---------- */
+// 表头支持中英文两套写法
+const COLS = {
+  id: ['单元ID', '单元id', 'id', 'unitId', '单元编号'],
+  title: ['单元标题', '标题', 'title'],
+  subtitle: ['副标题', '小标题', 'subtitle'],
+  level: ['级别', '等级', 'level'],
+  en: ['英文单词', '单词', 'en', 'word'],
+  cn: ['中文释义', '中文', '释义', 'cn'],
+  ipa: ['英音', '英式音标', 'ipa'],
+  ipaUs: ['美音', '美式音标', 'ipaUs'],
+  emoji: ['emoji', '图标'],
+  sentence: ['例句英文', '例句', 'sentence'],
+  sentenceCn: ['例句中文', '例句释义', 'sentenceCn'],
+  chunks: ['例句词块', '词块', 'chunks']
+}
+
+function pick(row, keys) {
+  for (const k of keys) {
+    const v = row[k]
+    if (v !== undefined && v !== null && String(v).trim() !== '') return String(v).trim()
+  }
+  return ''
+}
+
+function rowsToUnits(rows) {
+  const map = new Map()
+  const order = []
+  const warns = []
+  for (const row of rows) {
+    const id = pick(row, COLS.id)
+    if (!id) continue
+    if (!map.has(id)) {
+      const unit = {
+        id,
+        title: pick(row, COLS.title) || id,
+        subtitle: pick(row, COLS.subtitle),
+        level: pick(row, COLS.level) || 'L0',
+        words: []
+      }
+      map.set(id, unit)
+      order.push(id)
+    }
+    const unit = map.get(id)
+    if (!unit.title || unit.title === id) {
+      const t = pick(row, COLS.title)
+      if (t) unit.title = t
+    }
+    if (!unit.subtitle) unit.subtitle = pick(row, COLS.subtitle)
+    const lv = pick(row, COLS.level)
+    if (lv) unit.level = lv
+
+    const en = pick(row, COLS.en)
+    if (!en) continue
+    const words = unit.words || (unit.words = [])
+    const w = {
+      en,
+      cn: pick(row, COLS.cn),
+      ipa: pick(row, COLS.ipa),
+      ipaUs: pick(row, COLS.ipaUs),
+      emoji: pick(row, COLS.emoji),
+      sentences: []
+    }
+    const cn = pick(row, COLS.sentenceCn)
+    const manual = pick(row, COLS.chunks)
+    let se = pick(row, COLS.sentence)
+    if (!se && manual) {
+      // 只填了词块也能成句
+      se = manual
+        .split(/[|｜]/)
+        .map(x => x.split(/[=:：]/)[0].trim())
+        .filter(Boolean)
+        .join(' ')
+    }
+    if (se) {
+      let chunks = null
+      if (manual) {
+        // 例句词块写法：I=我|like=喜欢|apples=苹果
+        chunks = manual
+          .split(/[|｜]/)
+          .map(x => x.trim())
+          .filter(Boolean)
+          .map(pair => {
+            const i = pair.search(/[=:：]/)
+            return i < 0
+              ? { en: pair.trim(), cn: '' }
+              : { en: pair.slice(0, i).trim(), cn: pair.slice(i + 1).trim() }
+          })
+          .filter(c => c.en)
+      }
+      if (!chunks || !chunks.length) {
+        // 自动按空格切成词块；中文用 | 对齐，数量对上才能一一挂上
+        const tokens = se.split(/\s+/).filter(Boolean)
+        let cns = cn ? cn.split(/[|｜]/).map(x => x.trim()).filter(x => x) : []
+        if (cns.length !== tokens.length && cn && /\s/.test(cn)) {
+          const bySpace = cn.split(/\s+/).map(x => x.trim()).filter(x => x)
+          if (bySpace.length === tokens.length) cns = bySpace
+        }
+        if (cns.length === tokens.length) {
+          chunks = tokens.map((t, i) => ({ en: t, cn: cns[i] }))
+        } else {
+          chunks = tokens.map(t => ({ en: t, cn: '' }))
+          if (cns.length === 1) chunks[0].cn = cns[0]
+          if (cns.length > 1) {
+            warns.push(`「${en}」例句英文 ${tokens.length} 个词，例句中文 ${cns.length} 段，没对上，中文先留空`)
+          }
+        }
+      }
+      w.sentences.push({ chunks })
+    }
+    words.push(w)
+  }
+  const units = order.map(id => map.get(id)).filter(u => (u.words || []).length)
+  return { units, warns }
+}
+
+function readSheet(file) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader()
+    fr.onload = () => {
+      try {
+        const wb = XLSX.read(new Uint8Array(fr.result), { type: 'array' })
+        const sheet = wb.Sheets[wb.SheetNames[0]]
+        const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' })
+        resolve(rowsToUnits(rows))
+      } catch (e) {
+        reject(e)
+      }
+    }
+    fr.onerror = () => reject(new Error('文件读取失败'))
+    fr.readAsArrayBuffer(file)
+  })
+}
+
+const TEMPLATE_ROWS = [
+  {
+    单元ID: 'unit05',
+    单元标题: 'Unit 05 · 水果',
+    副标题: '第1天 · 新词学习',
+    级别: 'L0',
+    英文单词: 'apple',
+    中文释义: '苹果',
+    英音: '/ˈæpl/',
+    美音: '/ˈæpl/',
+    emoji: '🍎',
+    例句英文: 'I like apples.',
+    例句中文: '我|喜欢|苹果。'
+  },
+  {
+    单元ID: 'unit05',
+    单元标题: 'Unit 05 · 水果',
+    副标题: '第1天 · 新词学习',
+    级别: 'L0',
+    英文单词: 'banana',
+    中文释义: '香蕉',
+    英音: '/bəˈnɑːnə/',
+    美音: '/bəˈnænə/',
+    emoji: '🍌',
+    例句英文: 'The banana is yellow.',
+    例句中文: '香蕉|是|黄色的。'
+  }
+]
+
+function downloadTemplate() {
+  const ws = XLSX.utils.json_to_sheet(TEMPLATE_ROWS)
+  const wb = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(wb, ws, '题库')
+  XLSX.writeFile(wb, '英语题库导入模板.xlsx')
+}
+
 function sentenceEn(s) {
   return (s.chunks || [])
     .map(c => (c.en || '').trim())
@@ -96,6 +273,10 @@ export default function Chapters() {
   const [draft, setDraft] = useState(null)
   const [active, setActive] = useState(0)
   const [q, setQ] = useState('')
+  const [impOpen, setImpOpen] = useState(false)
+  const [impText, setImpText] = useState('')
+  const [impMode, setImpMode] = useState('merge')
+  const [impBusy, setImpBusy] = useState(false)
 
   const load = async () => {
     setLoading(true)
@@ -316,6 +497,78 @@ export default function Chapters() {
     }
   }
 
+  // 解析导入内容：支持 [ {...} ] 或 { units: [ {...} ] }
+  const parsedImport = useMemo(() => {
+    const t = impText.trim()
+    if (!t) return { units: [], words: 0, error: '' }
+    try {
+      const raw = JSON.parse(t)
+      const arr = Array.isArray(raw) ? raw : Array.isArray(raw && raw.units) ? raw.units : null
+      if (!arr) return { units: [], words: 0, error: '格式不对：需要单元数组，或 { "units": [...] }' }
+      const bad = arr.findIndex(u => !u || !String(u.id || '').trim())
+      if (bad >= 0) return { units: [], words: 0, error: `第 ${bad + 1} 条缺少 id` }
+      const noWords = arr.findIndex(u => !Array.isArray(u.words) || !u.words.length)
+      if (noWords >= 0) return { units: [], words: 0, error: `第 ${noWords + 1} 条（${arr[noWords].id}）没有 words` }
+      const words = arr.reduce((n, u) => n + u.words.filter(w => w && w.en).length, 0)
+      return { units: arr, words, error: '' }
+    } catch (e) {
+      return { units: [], words: 0, error: 'JSON 解析失败：' + (e.message || '格式有误') }
+    }
+  }, [impText])
+
+  const readFile = file => {
+    const name = String(file.name || '').toLowerCase()
+    const isSheet = /\.(xlsx|xls|csv)$/.test(name)
+    if (isSheet) {
+      readSheet(file)
+        .then(res => {
+          const units = res.units || []
+          if (!units.length) {
+            message.error('表格里没解析到有效数据，检查单元ID / 英文单词两列')
+            return
+          }
+          const words = units.reduce((n, u) => n + u.words.length, 0)
+          setImpText(JSON.stringify(units, null, 2))
+          message.success(`已解析 ${units.length} 个单元、${words} 个单词，确认后点「开始导入」`)
+          if (res.warns && res.warns.length) {
+            message.warning(`例句分段没对齐 ${res.warns.length} 处：${res.warns.slice(0, 3).join('；')}${res.warns.length > 3 ? ' …' : ''}`, 8)
+          }
+        })
+        .catch(e => message.error('表格解析失败：' + (e.message || '格式有误')))
+      return false
+    }
+    const fr = new FileReader()
+    fr.onload = () => setImpText(String(fr.result || ''))
+    fr.onerror = () => message.error('文件读取失败')
+    fr.readAsText(file)
+    return false // 阻止 antd 自动上传
+  }
+
+  const doImport = async () => {
+    if (parsedImport.error) {
+      message.error(parsedImport.error)
+      return
+    }
+    if (!parsedImport.units.length) {
+      message.error('还没有可导入的内容')
+      return
+    }
+    setImpBusy(true)
+    try {
+      const r = await importChapters(parsedImport.units, impMode)
+      message.success(
+        `导入成功：${r.imported} 个单元，当前题库共 ${r.total} 个单元` +
+          (r.mode === 'replace' ? '（已整体替换，旧题库备份为 chapters.json.bak）' : '')
+      )
+      setImpOpen(false)
+      setImpText('')
+      await load()
+    } catch (e) {
+      message.error(e.message)
+    }
+    setImpBusy(false)
+  }
+
   const shownUnits = useMemo(() => {
     const k = q.trim().toLowerCase()
     if (!k) return units
@@ -395,6 +648,7 @@ export default function Chapters() {
         <Button type='primary' onClick={() => openEditor(null)}>
           ＋ 新建单元
         </Button>
+        <Button onClick={() => setImpOpen(true)}>⬆ 导入题库</Button>
         <Button onClick={load} loading={loading}>
           刷新
         </Button>
@@ -666,6 +920,68 @@ export default function Chapters() {
           </div>
         ) : null}
       </Drawer>
+
+      <Modal
+        title='导入题库'
+        open={impOpen}
+        onCancel={() => setImpOpen(false)}
+        onOk={doImport}
+        okText={impBusy ? '导入中…' : '开始导入'}
+        confirmLoading={impBusy}
+        width={720}
+      >
+        <Space direction='vertical' style={{ width: '100%' }} size={12}>
+          <Alert
+            type='info'
+            showIcon
+            message='Excel/CSV 表头：单元ID、单元标题、副标题、级别、英文单词、中文释义、英音、美音、emoji、例句英文、例句中文、例句词块。一行一个单词；例句英文会按空格自动切成词块，例句中文用竖线按同样段数对齐，如：I like apples. / 我|喜欢|苹果。'
+          />
+          <Space>
+            <Button size='small' onClick={downloadTemplate}>下载 Excel 模板</Button>
+          </Space>
+          <Upload.Dragger accept='.xlsx,.xls,.csv,.json' maxCount={1} showUploadList={false} beforeUpload={readFile}>
+            <p className='ant-upload-drag-icon'>
+              <InboxOutlined />
+            </p>
+            <p className='ant-upload-text'>选择 Excel（.xlsx/.xls）或 CSV，也可以拖进来</p>
+            <p className='ant-upload-hint'>JSON 也能直接传；解析结果会填到下面，先核对再导入</p>
+          </Upload.Dragger>
+          <Input.TextArea
+            rows={10}
+            value={impText}
+            onChange={e => setImpText(e.target.value)}
+            placeholder='粘贴题库 JSON…'
+            style={{ fontFamily: 'monospace', fontSize: 12 }}
+          />
+          {parsedImport.error ? (
+            <Alert type='error' showIcon message={parsedImport.error} />
+          ) : parsedImport.units.length ? (
+            <Alert
+              type='success'
+              showIcon
+              message={
+                `已识别 ${parsedImport.units.length} 个单元、${parsedImport.words} 个单词：` +
+                parsedImport.units.slice(0, 6).map(u => u.id).join('、') +
+                (parsedImport.units.length > 6 ? ' …' : '')
+              }
+            />
+          ) : null}
+          <div>
+            <b style={{ marginRight: 12 }}>导入方式</b>
+            <Radio.Group value={impMode} onChange={e => setImpMode(e.target.value)}>
+              <Radio value='merge'>合并（同 id 覆盖，新的追加）</Radio>
+              <Radio value='replace'>整体替换（清空现有题库）</Radio>
+            </Radio.Group>
+          </div>
+          {impMode === 'replace' ? (
+            <Alert
+              type='warning'
+              showIcon
+              message='整体替换会删掉当前所有单元（旧题库自动备份到 chapters.json.bak）。确认无误再继续。'
+            />
+          ) : null}
+        </Space>
+      </Modal>
     </div>
   )
 }

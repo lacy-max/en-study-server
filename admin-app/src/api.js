@@ -60,6 +60,15 @@ export async function reorderChapters(ids) {
   return handle(res, '排序失败')
 }
 
+export async function importChapters(units, mode = 'merge') {
+  const res = await fetch(`${BASE}/api/chapters/import`, {
+    method: 'POST',
+    headers: adminHeaders(),
+    body: JSON.stringify({ units, mode })
+  })
+  return handle(res, '导入失败')
+}
+
 export async function fetchStudents() {
   const res = await fetch(`${BASE}/api/users`, { headers: adminHeaders() })
   return handle(res, '口令不对或读取失败')
